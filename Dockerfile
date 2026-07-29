@@ -23,8 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend CGC CORE
 COPY app/ ./app/
-# Si tienes otros paquetes, añádelos aquí:
-# COPY discipleai_legal/ ./discipleai_legal/
+
 
 # Directorios de runtime
 RUN mkdir -p /app/data /app/logs \
@@ -40,4 +39,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 
 # Comando: levantar FastAPI con Uvicorn
 # Ajusta el módulo según dónde esté tu app
-CMD ["uvicorn", "app.main:app", "--host", "aws-1-us-west-2.pooler.supabase.com", "--port", "8080"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
