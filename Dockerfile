@@ -1,42 +1,38 @@
-# ------------------------------------------------------
-# STAGE 1: Backend Runtime (Python + FastAPI)
-# ------------------------------------------------------
-FROM python:3.11-slim AS backend
+# 1. Usar imagen base ligera de Python 3.11
+FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
-
-# Crear usuario no-root
-RUN adduser --system --no-create-home appuser
+# Evitar que Python escriba archivos .pyc en disco y forzar stdout/stderr sin buffer
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Dependencias del sistema mínimas
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && apt-get clean \
+# 2. Instalar dependencias del sistema necesarias para PostgreSQL y Cryptography
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements any installer
+# 3. Crear el grupo y el usuario 'appuser' ANTES de usar chown
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# 4. Copiar e instalar dependencias de Python
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend CGC CORE
-COPY app/ ./app/
+# 5. Copiar todo el código fuente del proyecto
+COPY . .
 
+# 6. Crear los directorios de datos/logs y asignar permisos al usuario no-root
+RUN mkdir -p /app/data /app/logs && chown -R appuser:appuser /app
 
-# Directorios de runtime
-RUN mkdir -p /app/data /app/logs \
-    && chown -R appuser:appuser /app
-
+# 7. Cambiar al usuario seguro sin privilegios
 USER appuser
 
-EXPOSE 8080
+# 8. Puerto de escucha (Railway usará la variable PORT automáticamente)
+EXPOSE 8000
 
-# Healthcheck hacia tu endpoint real
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# Comando: levantar FastAPI con Uvicorn
-# Ajusta el módulo según dónde esté tu app
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# 9. Comando de arranque de la API
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
