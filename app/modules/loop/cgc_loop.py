@@ -27,7 +27,12 @@ from app.modules.sda.sdamodule import SDA
 from app.modules.tco.tcomodule import TCO
 
 try:
-    from .scmmodule import SCMModule as SCM
+    # SCM lives in the scm package (app/modules/scm/scmmodule.py) and the class
+    # is named SCM — same import app/main.py uses. The old '.scmmodule import
+    # SCMModule' pointed at a non-existent module in the loop package, so SCM
+    # silently became None and ComplianceEngine (which needs SCM + TCO) was
+    # permanently DISABLED.
+    from app.modules.scm.scmmodule import SCM
 except ImportError:
     SCM = None
     logger.warning("SCM module not available, continuing without SCM")

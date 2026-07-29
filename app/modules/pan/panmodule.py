@@ -57,6 +57,13 @@ class PAN:
         self.avg_response_time_ms = 120.0  # Improved from 127ms
         self.error_rate = 0.02
         
+        # Domain-pattern local fallback. Area-specific patterns were migrated to
+        # the DB (CGCDBLoader); this DEFAULT is only used when the DB returns
+        # nothing. Reuses the loader's _FALLBACK_PAN so patterns are not
+        # duplicated/invented here.
+        from app.Core.db.cgc_db_loader import _FALLBACK_PAN
+        self.domain_patterns = dict(_FALLBACK_PAN)
+
         logger.info(
             f"{self.module_name} v{self.version} initialized with "
             f"{len(self.domain_patterns)} domain patterns"

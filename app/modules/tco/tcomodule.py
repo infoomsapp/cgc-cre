@@ -131,7 +131,11 @@ class TCO:
         # MIGRATED — config loaded from Supabase via CGCDBLoader
         from app.Core.db.cgc_db_loader import get_db_loader
         self._db_loader = get_db_loader()
-        
+        # Retention-policy local fallback (migrated to DB). Reuse the loader's
+        # _FALLBACK_TCO so retention config is not duplicated/invented here.
+        from app.Core.db.cgc_db_loader import _FALLBACK_TCO
+        self.retention_policies = dict(_FALLBACK_TCO)
+
         # Metrics
         self.total_entries = 0
         self.total_blocks_verified = 0

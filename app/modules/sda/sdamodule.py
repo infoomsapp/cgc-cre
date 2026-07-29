@@ -94,6 +94,10 @@ class SDA:
         # MIGRATED — config loaded from Supabase via CGCDBLoader
         from app.Core.db.cgc_db_loader import get_db_loader
         self._db_loader = get_db_loader()
+        # Area-practice local fallback (migrated to DB via CGCDBLoader). Reuse the
+        # loader's _FALLBACK_SDA so practice sets are not duplicated/invented here.
+        from app.Core.db.cgc_db_loader import _FALLBACK_SDA
+        self.area_practices = dict(_FALLBACK_SDA)
         self.kb_path = kb_path
         self.max_kb_items = max_kb_items
         self.tco_hook = tco_hook  # Optional hook for TCO logging
