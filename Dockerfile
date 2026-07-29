@@ -1,19 +1,5 @@
 # ------------------------------------------------------
-# STAGE 1: Frontend Build (Node.js)
-# ------------------------------------------------------
-FROM node:20-alpine AS frontend_build
-
-WORKDIR /frontend
-
-# Copy just frontend archive
-COPY frontend/package*.json ./
-RUN npm install --omit=dev
-
-COPY frontend/ ./
-RUN npm run build
-
-# ------------------------------------------------------
-# STAGE 2: Backend Runtime (Python + FastAPI)
+# STAGE 1: Backend Runtime (Python + FastAPI)
 # ------------------------------------------------------
 FROM python:3.11-slim AS backend
 
@@ -36,12 +22,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend CGC CORE
-COPY cgc_core/ ./cgc_core/
+COPY app/ ./app/
 # Si tienes otros paquetes, añádelos aquí:
 # COPY discipleai_legal/ ./discipleai_legal/
-
-# Copiar estáticos compilados del frontend
-COPY --from=frontend_build /frontend/dist ./dist
 
 # Directorios de runtime
 RUN mkdir -p /app/data /app/logs \
