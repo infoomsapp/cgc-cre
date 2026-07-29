@@ -17,7 +17,6 @@ from app.Core.tenant.multi_tenant import tenant_manager
 from app.Core.logging import get_logger  
 from app.modules.prefilter import PreFilterResult
 
-# FIX 1 — JLA: Model Registry (replaces hardcoded "gpt-4o")
 # FIX 2 — PoD: Pre-delivery cryptographic interceptor
 from app.modules.pod.pod_interceptor import PoDInterceptor
 from app.modules.jla.model_registry import get_model_registry, ModelRegistry

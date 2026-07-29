@@ -23,7 +23,7 @@ router = APIRouter()
 @router.post(
     "",
     response_model=GovernResponse,
-    summary="Someter decisión al ciclo de governance",
+    summary="Someter decition to governance cycle",
     description="""
 Ejecuta el ciclo completo de governance CGC Core sobre el payload enviado:
 

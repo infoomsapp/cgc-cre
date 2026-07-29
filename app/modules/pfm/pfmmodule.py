@@ -122,6 +122,18 @@ class PFM:
         self.avg_response_time_ms = 85.0
         self.error_rate = 0.06
         
+        # Risk-model local fallback. Area-specific models were migrated to the DB
+        # (CGCDBLoader.get_pfm); this DEFAULT is only used when the DB returns
+        # nothing. Reuses the loader's own _FALLBACK_PFM so risk values are NOT
+        # duplicated/invented here. NOTE: the loader keys the generic model as
+        # 'default_action' while this module reads 'generic_action' — bridged
+        # below. Reconcile that naming in your DB config for full DB-path
+        # correctness (the local fallback works either way).
+        from app.Core.db.cgc_db_loader import _FALLBACK_PFM
+        _pfm_default = dict(_FALLBACK_PFM.get("DEFAULT", {}))
+        _generic = _pfm_default.get("generic_action") or _pfm_default.get("default_action") or {}
+        self.risk_models = {"DEFAULT": {"generic_action": _generic, **_pfm_default}}
+
         logger.info(
             f"{self.module_name} v{self.version} initialized with "
             f"{len(self.risk_models)} risk models"

@@ -6,5 +6,5 @@ build-backend = "setuptools.build_meta"
 name = "cgc_core"
 version = "0.1.0"
 description = "CGC Core Engine"
-authors = [{name="OlympusMont Systems"}]
+authors = [{name="Olympus Mont Systems LLC"}]
 dependencies = []
