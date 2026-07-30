@@ -28,7 +28,6 @@ email-validator==2.3.0
 fastapi==0.121.1
 Flask==3.1.2
 flask-cors==6.0.1
-flatdict==4.0.1
 fonttools==4.60.1
 frozenlist==1.8.0
 google-api-core==2.28.1
