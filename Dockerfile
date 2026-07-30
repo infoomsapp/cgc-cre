@@ -15,9 +15,8 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 
 COPY requirements.txt .
 
-# Instalar setuptools y wheel previamente y desactivar la insolación de compilación
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir --build-isolation=false -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
