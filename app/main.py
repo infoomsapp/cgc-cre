@@ -1,7 +1,7 @@
 ﻿"""
 CGC CORE - Enterprise API Gateway (v2.2.2)
 Python 3.13.1+ | Unified Governance Engine
-Strictly Production | Olympus Mont Systems LLC  2025
+Strictly Production | Olympus Mont Systems LLC  2026
 """
 
 import asyncio

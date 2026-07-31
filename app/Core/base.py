@@ -205,7 +205,7 @@ class CGCCore(GovernanceEngine):
         }
 
 
-# Ejemplo de uso
+# Use Test
 if __name__ == "__main__":
     # Inicializar CGC Core para banca
     cgc = CGCCore(sector="banking")
