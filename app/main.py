@@ -42,6 +42,9 @@ from app.modules.loop.cgc_loop import LOOP
 # Forensic verify router (PoD chain integrity + per-decision proof).
 from api.v1.endpoints.verify import router as verify_router
 
+# Application monitoring router (LedgiProof + LedgiProof Tax Pro client error reports).
+from api.v1.endpoints.monitor import router as monitor_router
+
 # Type Aliases (Python 3.12+)
 type AuditHash = str
 type SentinelResponse = Dict[str, Any]
@@ -104,6 +107,14 @@ async def require_admin(user=Depends(get_current_user)):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin required")
     return user
+
+# Mount the application-monitoring router → /monitor/error, /monitor/errors, ...
+# Same Bearer-token auth as every other authenticated endpoint, enforced here
+# at the router level so monitor.py itself carries no auth logic.
+app.include_router(
+    monitor_router, prefix="/monitor", tags=["Monitoring"],
+    dependencies=[Depends(get_current_user)]
+)
 
 # PreFilter Helper
 async def run_cgc_prefilter(
@@ -226,6 +237,13 @@ async def trace_execution(request: Request, call_next: Any) -> Any:
 # =========================
 # HEALTH + GOVERNANCE
 # =========================
+@app.get("/health", tags=["System"])
+async def health() -> Dict[str, Any]:
+    """Liveness probe for Railway (railway.toml healthcheckPath = "/health").
+    No auth, no DB dependency — just confirms the process is up and serving,
+    which is all a deploy healthcheck should require."""
+    return {"status": "ok", "version": "2.2.2"}
+
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:
     """Root endpoint con información del sistema unificado."""

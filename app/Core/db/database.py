@@ -9,8 +9,9 @@ import os
 import json
 import time
 import logging
+import hashlib
 from typing import Dict, Optional, List, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 import threading
 import re
@@ -89,7 +90,8 @@ class Database:
             'module_results.json': [],
             'loop_decisions.json': [],
             'feedback.json': [],
-            'audit_traces.json': []
+            'audit_traces.json': [],
+            'error_reports.json': []
         }
         for filename, default in files.items():
             filepath = os.path.join(self.data_dir, filename)
@@ -221,6 +223,27 @@ class Database:
                 )
             """)
             
+            # APPLICATION MONITORING (LedgiProof + LedgiProof Tax Pro client error reports —
+            # separate concern from the governance/decision tables above: this is plain
+            # crash telemetry, not a governed decision)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_error_reports (
+                    fingerprint  VARCHAR(32) PRIMARY KEY,
+                    app_source   VARCHAR(50) NOT NULL,
+                    environment  VARCHAR(20) DEFAULT 'production',
+                    severity     VARCHAR(20) DEFAULT 'error',
+                    message      TEXT NOT NULL,
+                    stack        TEXT,
+                    url          TEXT,
+                    user_agent   TEXT,
+                    context      JSONB,
+                    count        INT DEFAULT 1,
+                    resolved     BOOLEAN DEFAULT FALSE,
+                    first_seen   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    last_seen    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+            """)
+
             conn.commit()
             logger.info("All CGC governance tables created/verified")
 
@@ -431,6 +454,173 @@ class Database:
                 traces.append({**trace_data, 'decision_id': decision_id})
                 self._write_json_list('audit_traces.json', traces[-5000:])
                 return True
+
+    # ======================================================================
+    # APPLICATION MONITORING (client error reports — LedgiProof / LTP)
+    # ======================================================================
+
+    @staticmethod
+    def _error_fingerprint(app_source: str, message: str, stack: Optional[str]) -> str:
+        """Stable dedup key: same app + same error site collapses to one row
+        with a running count, instead of one row per occurrence."""
+        top_frame = ''
+        for line in (stack or '').splitlines():
+            line = line.strip()
+            if line:
+                top_frame = line
+                break
+        raw = f"{app_source}|{(message or '')[:200]}|{top_frame[:200]}"
+        return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]
+
+    def save_error_report(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert a client error report by fingerprint. Returns
+        {fingerprint, first_seen, count} so the caller (the /monitor/error
+        endpoint) knows whether this is a brand-new error worth alerting on."""
+        fingerprint = self._error_fingerprint(
+            report.get('app_source', 'unknown'), report.get('message', ''), report.get('stack')
+        )
+
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_error_reports
+                            (fingerprint, app_source, environment, severity, message, stack, url, user_agent, context)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (fingerprint) DO UPDATE SET
+                            count      = cgc_error_reports.count + 1,
+                            last_seen  = NOW(),
+                            resolved   = FALSE,
+                            url        = EXCLUDED.url,
+                            user_agent = EXCLUDED.user_agent,
+                            context    = EXCLUDED.context
+                        RETURNING count, (xmax = 0) AS first_seen
+                    """, (
+                        fingerprint,
+                        report.get('app_source'),
+                        report.get('environment', 'production'),
+                        report.get('severity', 'error'),
+                        report.get('message', ''),
+                        report.get('stack'),
+                        report.get('url'),
+                        report.get('user_agent'),
+                        json.dumps(report.get('context') or {})
+                    ))
+                    row = cur.fetchone()
+                    return {'fingerprint': fingerprint, 'first_seen': bool(row['first_seen']), 'count': row['count']}
+        else:
+            with self.json_lock:
+                reports = self._read_json_list('error_reports.json')
+                now = datetime.now(timezone.utc).isoformat()
+                for r in reports:
+                    if r.get('fingerprint') == fingerprint:
+                        r['count'] = r.get('count', 1) + 1
+                        r['last_seen'] = now
+                        r['resolved'] = False
+                        r['url'] = report.get('url')
+                        r['user_agent'] = report.get('user_agent')
+                        r['context'] = report.get('context') or {}
+                        self._write_json_list('error_reports.json', reports)
+                        return {'fingerprint': fingerprint, 'first_seen': False, 'count': r['count']}
+                new_row = {
+                    'fingerprint':  fingerprint,
+                    'app_source':   report.get('app_source'),
+                    'environment':  report.get('environment', 'production'),
+                    'severity':     report.get('severity', 'error'),
+                    'message':      report.get('message', ''),
+                    'stack':        report.get('stack'),
+                    'url':          report.get('url'),
+                    'user_agent':   report.get('user_agent'),
+                    'context':      report.get('context') or {},
+                    'count':        1,
+                    'resolved':     False,
+                    'first_seen_at': now,
+                    'last_seen':    now
+                }
+                reports.append(new_row)
+                self._write_json_list('error_reports.json', reports[-5000:])
+                return {'fingerprint': fingerprint, 'first_seen': True, 'count': 1}
+
+    def get_error_reports(
+        self, app_source: Optional[str] = None, resolved: Optional[bool] = None,
+        since_days: Optional[int] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            clauses, params = [], []
+            if app_source is not None:
+                clauses.append("app_source = %s"); params.append(app_source)
+            if resolved is not None:
+                clauses.append("resolved = %s"); params.append(resolved)
+            if since_days is not None:
+                clauses.append("last_seen > %s"); params.append(datetime.now(timezone.utc) - timedelta(days=since_days))
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(f"""
+                        SELECT * FROM cgc_error_reports {where}
+                        ORDER BY last_seen DESC LIMIT %s
+                    """, params)
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            reports = self._read_json_list('error_reports.json')
+            if app_source is not None:
+                reports = [r for r in reports if r.get('app_source') == app_source]
+            if resolved is not None:
+                reports = [r for r in reports if r.get('resolved', False) == resolved]
+            if since_days is not None:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+                reports = [r for r in reports if r.get('last_seen', '') > cutoff]
+            reports.sort(key=lambda r: r.get('last_seen', ''), reverse=True)
+            return reports[:limit]
+
+    def get_error_stats(self, days: int = 7) -> Dict[str, Any]:
+        reports = self.get_error_reports(since_days=days, limit=100000)
+        by_app: Dict[str, int] = {}
+        by_severity: Dict[str, int] = {}
+        for r in reports:
+            by_app[r.get('app_source', 'unknown')] = by_app.get(r.get('app_source', 'unknown'), 0) + r.get('count', 1)
+            by_severity[r.get('severity', 'error')] = by_severity.get(r.get('severity', 'error'), 0) + r.get('count', 1)
+        top = sorted(reports, key=lambda r: r.get('count', 1), reverse=True)[:10]
+        return {
+            'window_days':   days,
+            'total_reports': len(reports),
+            'total_occurrences': sum(r.get('count', 1) for r in reports),
+            'unresolved':    sum(1 for r in reports if not r.get('resolved', False)),
+            'by_app_source': by_app,
+            'by_severity':   by_severity,
+            'top_errors': [
+                {
+                    'fingerprint': r.get('fingerprint'),
+                    'app_source':  r.get('app_source'),
+                    'message':     r.get('message'),
+                    'severity':    r.get('severity'),
+                    'count':       r.get('count', 1),
+                    'last_seen':   r.get('last_seen'),
+                } for r in top
+            ]
+        }
+
+    def resolve_error_report(self, fingerprint: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE cgc_error_reports SET resolved = TRUE WHERE fingerprint = %s",
+                        (fingerprint,)
+                    )
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                reports = self._read_json_list('error_reports.json')
+                found = False
+                for r in reports:
+                    if r.get('fingerprint') == fingerprint:
+                        r['resolved'] = True
+                        found = True
+                if found:
+                    self._write_json_list('error_reports.json', reports)
+                return found
 
     # ======================================================================
     # ANALYTICS & LEARNING QUERIES
