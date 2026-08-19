@@ -2,7 +2,7 @@
 Traceability & Cognitive Oversight (TCO) - ENHANCED
 Immutable, context-aware audit trail with blockchain-style integrity
 Integrated with PreFilter context (area, sensitivity, compliance status)
-Production-ready with SQLite3 WAL, chain verification, and rich metrics
+Production-ready: Postgres-backed (cgc_tco schema), chain verification, rich metrics
 Olympus Mont Systems LLC © 2026
 """
 
@@ -10,7 +10,6 @@ import json
 import hashlib
 import logging
 import os
-import sqlite3
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
@@ -112,17 +111,21 @@ class TCO:
 
     def __init__(
         self,
-        db_path: str = os.getenv("CGC_TCO_DB_PATH", "data/audit_chain.db"),
         genesis_seed: str = "CGC_CORE_GENESIS_2025"
     ):
         self.module_name = "TCO"
         self.version = "3.0.0"  # Enhanced version
         self.status = "active"
         self.health = 99.0
-        
+
         # Configuration
-        self.db_path = db_path
         self.genesis_seed = genesis_seed
+        # Postgres-backed (cgc_tco schema, created by Database._create_tco_schema()) --
+        # used to be a local SQLite file, which is wiped on every Vercel
+        # cold start/redeploy (/tmp is ephemeral). Same shared Database
+        # singleton every other module already uses.
+        from app.Core.db.database import get_database
+        self._db = get_database()
         # MIGRATED — config loaded from Supabase via CGCDBLoader
         from app.Core.db.cgc_db_loader import get_db_loader
         self._db_loader = get_db_loader()
@@ -139,15 +142,11 @@ class TCO:
         self.avg_log_time_ms = 0.0
         self.avg_verify_time_ms = 0.0
         self.error_rate = 0.01
-        
-        # Initialize database
-        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
-        self._init_audit_db()
-        
-        # Load chain state
+
+        # Load chain state (schema itself is created by Database, not here)
         self.total_entries = self._get_total_entries()
         self.last_block_hash = self._get_last_hash()
-        
+
         logger.info(
             f"{self.module_name} v{self.version} initialized | "
             f"Entries: {self.total_entries:,} | "
@@ -158,103 +157,6 @@ class TCO:
     def _get_retention(self, area: str) -> dict:
         """Load retention policy from Supabase. Replaces AUDIT_RETENTION_POLICIES[area]."""
         return self._db_loader.get_tco(area)
-
-    # ========================================================================
-    # DATABASE INITIALIZATION
-    # ========================================================================
-
-    def _init_audit_db(self):
-        """Initialize SQLite database with WAL mode for high concurrency."""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            
-            # Enable WAL mode for concurrent access
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=10000")
-            
-            cursor = conn.cursor()
-            
-            # Main audit trail table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS audit_trail (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    block_number INTEGER UNIQUE NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    decision_id TEXT NOT NULL,
-                    module_source TEXT,
-                    area TEXT NOT NULL,
-                    sensitivity_level TEXT,
-                    action TEXT NOT NULL,
-                    data_hash TEXT NOT NULL,
-                    result_hash TEXT NOT NULL,
-                    previous_hash TEXT NOT NULL,
-                    block_hash TEXT UNIQUE NOT NULL,
-                    
-                    -- Compliance metadata
-                    compliance_owner_present BOOLEAN DEFAULT 0,
-                    critical_framework_violated BOOLEAN DEFAULT 0,
-                    human_review_required BOOLEAN DEFAULT 0,
-                    
-                    -- Retention & verification
-                    retention_days INTEGER DEFAULT 365,
-                    tamper_detection_level TEXT DEFAULT 'HIGH',
-                    verified BOOLEAN DEFAULT 1,
-                    verification_time_ms REAL DEFAULT 0.0,
-                    
-                    -- Timestamps
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    verified_at TIMESTAMP
-                )
-            ''')
-            
-            # Create indices for fast queries
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_decision_id ON audit_trail(decision_id)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_block_hash ON audit_trail(block_hash)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_area ON audit_trail(area)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_trail(timestamp)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_block_number ON audit_trail(block_number)')
-
-            # SQLite has no ADD COLUMN IF NOT EXISTS -- this is the standard
-            # safe idiom for a column added after the table already shipped.
-            # Neither existed before today: nothing identified which
-            # connected app (LedgiProof vs. Tax Pro) originated a decision,
-            # and "outcome" (APPROVE/REJECT/REQUIRE_HUMAN) was passed into
-            # log_decision() via decision_summary but never actually
-            # persisted. Both nullable -- rows written before this deploy
-            # stay NULL ("unattributed"), not an error.
-            cursor.execute("PRAGMA table_info(audit_trail)")
-            existing_cols = {row[1] for row in cursor.fetchall()}
-            if "app_source" not in existing_cols:
-                cursor.execute("ALTER TABLE audit_trail ADD COLUMN app_source TEXT")
-            if "outcome" not in existing_cols:
-                cursor.execute("ALTER TABLE audit_trail ADD COLUMN outcome TEXT")
-
-            # Chain integrity log (for tamper detection)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS chain_integrity_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    block_number INTEGER,
-                    verification_result TEXT,
-                    integrity_score REAL,
-                    tamper_detected BOOLEAN DEFAULT 0,
-                    details TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_integrity_block ON chain_integrity_log(block_number)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tamper_detected ON chain_integrity_log(tamper_detected)')
-            
-            conn.commit()
-            conn.close()
-            
-            logger.info(f"[TCO] Database initialized: {self.db_path}")
-        
-        except Exception as e:
-            logger.error(f"[TCO] Database initialization failed: {e}")
-            raise
 
     # ========================================================================
     # AUDIT LOGGING
@@ -463,37 +365,37 @@ class TCO:
     ):
         """Store audit entry in database."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            cursor.execute('''
-                INSERT INTO audit_trail
-                (
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    logger.error("[TCO] Store entry failed: no database connection")
+                    return
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO cgc_tco.audit_trail
+                    (
+                        block_number, timestamp, decision_id, module_source, area,
+                        sensitivity_level, action, data_hash, result_hash,
+                        previous_hash, block_hash, compliance_owner_present,
+                        critical_framework_violated, human_review_required,
+                        retention_days, tamper_detection_level, verified,
+                        app_source, outcome
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (
                     block_number, timestamp, decision_id, module_source, area,
                     sensitivity_level, action, data_hash, result_hash,
                     previous_hash, block_hash, compliance_owner_present,
                     critical_framework_violated, human_review_required,
-                    retention_days, tamper_detection_level, verified,
+                    retention_days, tamper_detection_level, True,
                     app_source, outcome
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                block_number, timestamp, decision_id, module_source, area,
-                sensitivity_level, action, data_hash, result_hash,
-                previous_hash, block_hash, compliance_owner_present,
-                critical_framework_violated, human_review_required,
-                retention_days, tamper_detection_level, True,
-                app_source, outcome
-            ))
-            
-            conn.commit()
-            conn.close()
-        
-        except sqlite3.IntegrityError:
-            logger.warning(f"[TCO] Duplicate block {block_number}, skipping insert")
+                ))
+
         except Exception as e:
-            logger.error(f"[TCO] Store entry failed: {e}")
-            raise
+            if "duplicate key" in str(e).lower() or "unique constraint" in str(e).lower():
+                logger.warning(f"[TCO] Duplicate block {block_number}, skipping insert")
+            else:
+                logger.error(f"[TCO] Store entry failed: {e}")
+                raise
 
     # ========================================================================
     # CHAIN VERIFICATION & TAMPER DETECTION
@@ -517,21 +419,20 @@ class TCO:
             if end_block is None:
                 end_block = self.total_entries
             
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT
-                    block_number, timestamp, block_hash, previous_hash,
-                    area, sensitivity_level, tamper_detection_level
-                FROM audit_trail
-                WHERE block_number BETWEEN ? AND ?
-                ORDER BY block_number ASC
-            ''', (start_block, end_block))
-            
-            rows = cursor.fetchall()
-            conn.close()
-            
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return {"verified": False, "error": "no database connection", "integrity": 0.0}
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT
+                        block_number, timestamp, block_hash, previous_hash,
+                        area, sensitivity_level, tamper_detection_level
+                    FROM cgc_tco.audit_trail
+                    WHERE block_number BETWEEN %s AND %s
+                    ORDER BY block_number ASC
+                ''', (start_block, end_block))
+                rows = cursor.fetchall()
+
             if not rows:
                 return {
                     "verified": True,
@@ -539,33 +440,33 @@ class TCO:
                     "blocks_checked": 0,
                     "tampering_detected": False
                 }
-            
+
             # Verify chain links
             tamper_detected = False
             integrity_score = 100.0
-            
+
             for i in range(1, len(rows)):
                 prev_block = rows[i - 1]
                 curr_block = rows[i]
-                
+
                 # Check if current block's previous_hash matches previous block's hash
-                if curr_block[3] != prev_block[2]:  # previous_hash != block_hash
+                if curr_block["previous_hash"] != prev_block["block_hash"]:
                     logger.critical(
-                        f"[TCO] TAMPER DETECTED at block {curr_block[0]} | "
-                        f"Hash link broken: {prev_block[2][:16]}... != {curr_block[3][:16]}..."
+                        f"[TCO] TAMPER DETECTED at block {curr_block['block_number']} | "
+                        f"Hash link broken: {prev_block['block_hash'][:16]}... != {curr_block['previous_hash'][:16]}..."
                     )
                     tamper_detected = True
                     integrity_score = 0.0
                     self.total_tampering_attempts += 1
-                    
+
                     # Log tamper attempt
-                    self._log_tamper_attempt(curr_block[0], "hash_link_broken")
-            
+                    self._log_tamper_attempt(curr_block["block_number"], "hash_link_broken")
+
             # Verify genesis link if checking from block 1
             if start_block == 1 and rows:
                 first_block = rows[0]
                 genesis_hash = self._get_genesis_hash()
-                if first_block[3] != genesis_hash:
+                if first_block["previous_hash"] != genesis_hash:
                     logger.warning(f"[TCO] Genesis link verification failed")
                     integrity_score *= 0.8
             
@@ -599,23 +500,21 @@ class TCO:
     def _log_tamper_attempt(self, block_number: int, reason: str):
         """Log tamper detection attempt."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO chain_integrity_log
-                (timestamp, block_number, verification_result, tamper_detected, details)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (
-                datetime.utcnow().isoformat() + "Z",
-                block_number,
-                "TAMPER_DETECTED",
-                True,
-                reason
-            ))
-            
-            conn.commit()
-            conn.close()
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO cgc_tco.chain_integrity_log
+                    (timestamp, block_number, verification_result, tamper_detected, details)
+                    VALUES (%s, %s, %s, %s, %s)
+                ''', (
+                    datetime.utcnow().isoformat() + "Z",
+                    block_number,
+                    "TAMPER_DETECTED",
+                    True,
+                    reason
+                ))
         except Exception as e:
             logger.error(f"[TCO] Failed to log tamper attempt: {e}")
 
@@ -626,37 +525,33 @@ class TCO:
     def get_decision_audit(self, decision_id: str) -> Dict[str, Any]:
         """Retrieve complete audit trail for a decision."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT * FROM audit_trail
-                WHERE decision_id = ?
-                ORDER BY block_number DESC
-                LIMIT 1
-            ''', (decision_id,))
-            
-            row = cursor.fetchone()
-            
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return {"found": False, "error": "no database connection", "decision_id": decision_id}
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM cgc_tco.audit_trail
+                    WHERE decision_id = %s
+                    ORDER BY block_number DESC
+                    LIMIT 1
+                ''', (decision_id,))
+                row = cursor.fetchone()
+
             if not row:
-                conn.close()
                 return {
                     "found": False,
                     "decision_id": decision_id
                 }
-            
-            # Get column names
-            columns = [desc[0] for desc in cursor.description]
-            entry = dict(zip(columns, row))
-            
-            # Verify this block
+
+            entry = dict(row)
+
+            # Verify this block (opens its own connection, done after the
+            # fetch connection above is released back to the pool)
             verification = self.verify_chain(
                 start_block=entry["block_number"],
                 end_block=entry["block_number"]
             )
-            
-            conn.close()
-            
+
             return {
                 "found": True,
                 "decision_id": decision_id,
@@ -681,40 +576,163 @@ class TCO:
     ) -> Dict[str, Any]:
         """Retrieve audit trail with optional filters."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            query = "SELECT * FROM audit_trail WHERE 1=1"
+            query = "SELECT * FROM cgc_tco.audit_trail WHERE 1=1"
             params = []
-            
+
             if decision_id:
-                query += " AND decision_id = ?"
+                query += " AND decision_id = %s"
                 params.append(decision_id)
-            
+
             if area:
-                query += " AND area = ?"
+                query += " AND area = %s"
                 params.append(area)
-            
-            query += " ORDER BY block_number DESC LIMIT ?"
+
+            query += " ORDER BY block_number DESC LIMIT %s"
             params.append(limit)
-            
-            cursor.execute(query, params)
-            columns = [desc[0] for desc in cursor.description]
-            rows = cursor.fetchall()
-            conn.close()
-            
-            entries = [dict(zip(columns, row)) for row in rows]
-            
+
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return {"status": "error", "message": "no database connection"}
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+
+            entries = [dict(row) for row in rows]
+
             return {
                 "total_entries": len(entries),
                 "entries": entries,
                 "filters": {"decision_id": decision_id, "area": area},
                 "limit": limit
             }
-        
+
         except Exception as e:
             logger.error(f"[TCO] Get audit trail failed: {e}")
             return {"status": "error", "message": str(e)}
+
+    def get_audit_trail_by_app(
+        self,
+        app_source: str,
+        from_date: str,
+        to_date: str,
+        limit: int = 500
+    ) -> Dict[str, Any]:
+        """
+        Audit trail filtered by connected app + date range -- powers the
+        per-app PDF governance reports. Same query shape as get_audit_trail(),
+        with app_source and a timestamp range added. timestamp is stored as
+        ISO8601 text (datetime.utcnow().isoformat()-based, always the same
+        format), so a plain string BETWEEN gives correct chronological
+        ordering without needing a TIMESTAMPTZ column.
+        """
+        try:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return {"status": "error", "message": "no database connection"}
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM cgc_tco.audit_trail
+                    WHERE app_source = %s
+                      AND timestamp BETWEEN %s AND %s
+                    ORDER BY block_number DESC
+                    LIMIT %s
+                ''', (app_source, from_date, to_date, limit))
+                rows = cursor.fetchall()
+
+            entries = [dict(row) for row in rows]
+
+            return {
+                "total_entries": len(entries),
+                "entries": entries,
+                "app_source": app_source,
+                "from_date": from_date,
+                "to_date": to_date,
+                "limit": limit,
+                "truncated": len(entries) == limit
+            }
+
+        except Exception as e:
+            logger.error(f"[TCO] Get audit trail by app failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def generate_app_report_pdf(self, app_source: str, from_date: str, to_date: str) -> bytes:
+        """
+        Builds an in-memory PDF: a decision summary + the full audit chain
+        for one connected app over a date range. Same reportlab pattern as
+        ComplianceEngine._generate_pdf_report (SimpleDocTemplate -> list of
+        Paragraph/Spacer/Table flowables -> doc.build()), but returns raw
+        bytes via io.BytesIO() instead of a filesystem path -- nothing here
+        needs to persist across requests, so there's no reason to touch
+        disk at all (unlike the compliance report, which writes to
+        tempfile.gettempdir() because it's meant to be referenced later).
+        """
+        import io
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        result = self.get_audit_trail_by_app(app_source, from_date, to_date, limit=500)
+        entries = result.get("entries", [])
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = []
+
+        story.append(Paragraph(f"CGC Core — Governance Report: {app_source}", styles['Title']))
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(
+            f"Period: {from_date} to {to_date} | Generated: {datetime.utcnow().isoformat()}Z",
+            styles['Normal']
+        ))
+        story.append(Spacer(1, 12))
+
+        # Summary
+        outcome_counts: Dict[str, int] = {}
+        critical_count = 0
+        human_review_count = 0
+        for e in entries:
+            outcome = e.get("outcome") or "unattributed"
+            outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+            if e.get("critical_framework_violated"):
+                critical_count += 1
+            if e.get("human_review_required"):
+                human_review_count += 1
+
+        story.append(Paragraph("Summary", styles['Heading2']))
+        summary_data = [["Metric", "Count"], ["Total decisions", str(len(entries))]]
+        for outcome, count in sorted(outcome_counts.items()):
+            summary_data.append([outcome, str(count)])
+        summary_data.append(["Critical framework violations", str(critical_count)])
+        summary_data.append(["Human review required", str(human_review_count)])
+        story.append(Table(summary_data))
+        story.append(Spacer(1, 20))
+
+        # Full audit chain
+        story.append(Paragraph("Audit Chain", styles['Heading2']))
+        if result.get("truncated"):
+            story.append(Paragraph(
+                "Showing the most recent 500 entries for this period; more exist.",
+                styles['Normal']
+            ))
+            story.append(Spacer(1, 6))
+
+        chain_data = [["Block", "Timestamp", "Decision ID", "Area", "Sensitivity", "Outcome", "Hash", "Verified"]]
+        for e in entries:
+            chain_data.append([
+                str(e.get("block_number", "")),
+                (e.get("timestamp") or "")[:19],
+                (e.get("decision_id") or "")[:16],
+                e.get("area") or "",
+                e.get("sensitivity_level") or "",
+                e.get("outcome") or "unattributed",
+                (e.get("block_hash") or "")[:16] + "...",
+                "Y" if e.get("verified") else "N",
+            ])
+        story.append(Table(chain_data))
+
+        doc.build(story)
+        return buffer.getvalue()
 
     # ========================================================================
     # HELPER METHODS
@@ -734,12 +752,13 @@ class TCO:
     def _get_total_entries(self) -> int:
         """Get total audit entries."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM audit_trail")
-            count = cursor.fetchone()[0]
-            conn.close()
-            return count
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return 0
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) AS c FROM cgc_tco.audit_trail")
+                row = cursor.fetchone()
+                return row["c"] if row else 0
         except Exception as e:
             logger.error(f"[TCO] Get total entries failed: {e}")
             return 0
@@ -747,12 +766,13 @@ class TCO:
     def _get_last_hash(self) -> str:
         """Get last block hash or genesis hash."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT block_hash FROM audit_trail ORDER BY block_number DESC LIMIT 1")
-            result = cursor.fetchone()
-            conn.close()
-            return result[0] if result else self._get_genesis_hash()
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return self._get_genesis_hash()
+                cursor = conn.cursor()
+                cursor.execute("SELECT block_hash FROM cgc_tco.audit_trail ORDER BY block_number DESC LIMIT 1")
+                result = cursor.fetchone()
+                return result["block_hash"] if result else self._get_genesis_hash()
         except Exception as e:
             logger.error(f"[TCO] Get last hash failed: {e}")
             return self._get_genesis_hash()

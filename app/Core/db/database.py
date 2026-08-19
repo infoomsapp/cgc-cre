@@ -58,6 +58,7 @@ class Database:
         self._create_tables()
         self._create_jla_schema()
         self._create_pod_schema()
+        self._create_tco_schema()
 
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
@@ -633,6 +634,83 @@ class Database:
                 logger.info("cgc_pod PoD chain schema created/verified")
         except Exception as e:
             logger.error(f"cgc_pod schema provisioning failed (non-fatal, PoD stays in-memory-only): {e}")
+
+    def _create_tco_schema(self):
+        """
+        TCO's audit chain used to live entirely in a local SQLite file
+        (CGC_TCO_DB_PATH, default /tmp/data/audit_chain.db on Vercel) --
+        /tmp is wiped on every cold start/redeploy/scale event, confirmed
+        live: block_number correctly incremented across consecutive calls
+        on one warm instance, then reset to 1 on the very next deploy. The
+        "immutable audit chain" was never actually durable. This schema
+        replaces that file with the same real Postgres already used by
+        cgc_jla/cgc_pod -- no new infrastructure, and TCO's own Python
+        methods (see app/modules/tco/tcomodule.py) now read/write here
+        instead of sqlite3.connect(). No data migration: nothing in the
+        old SQLite file survived a cold start anyway, so there is nothing
+        durable to carry over.
+        """
+        if not self.use_postgres:
+            return
+
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_tco")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_tco.audit_trail (
+                        id                              SERIAL PRIMARY KEY,
+                        block_number                    INTEGER UNIQUE NOT NULL,
+                        timestamp                       TEXT NOT NULL,
+                        decision_id                     TEXT NOT NULL,
+                        module_source                   TEXT,
+                        area                             TEXT NOT NULL,
+                        sensitivity_level                TEXT,
+                        action                           TEXT NOT NULL,
+                        data_hash                        TEXT NOT NULL,
+                        result_hash                      TEXT NOT NULL,
+                        previous_hash                    TEXT NOT NULL,
+                        block_hash                       TEXT UNIQUE NOT NULL,
+                        compliance_owner_present          BOOLEAN DEFAULT FALSE,
+                        critical_framework_violated       BOOLEAN DEFAULT FALSE,
+                        human_review_required             BOOLEAN DEFAULT FALSE,
+                        retention_days                   INTEGER DEFAULT 365,
+                        tamper_detection_level            TEXT DEFAULT 'HIGH',
+                        verified                         BOOLEAN DEFAULT TRUE,
+                        verification_time_ms              NUMERIC DEFAULT 0.0,
+                        created_at                       TIMESTAMPTZ DEFAULT NOW(),
+                        verified_at                      TIMESTAMPTZ,
+                        app_source                       TEXT,
+                        outcome                          TEXT
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_decision_id ON cgc_tco.audit_trail(decision_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_block_hash ON cgc_tco.audit_trail(block_hash)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_area ON cgc_tco.audit_trail(area)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_timestamp ON cgc_tco.audit_trail(timestamp)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_block_number ON cgc_tco.audit_trail(block_number)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_app_source ON cgc_tco.audit_trail(app_source)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_tco.chain_integrity_log (
+                        id                      SERIAL PRIMARY KEY,
+                        timestamp               TEXT NOT NULL,
+                        block_number            INTEGER,
+                        verification_result     TEXT,
+                        integrity_score         NUMERIC,
+                        tamper_detected         BOOLEAN DEFAULT FALSE,
+                        details                 TEXT,
+                        created_at              TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_integrity_block ON cgc_tco.chain_integrity_log(block_number)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_tamper_detected ON cgc_tco.chain_integrity_log(tamper_detected)")
+
+                conn.commit()
+                logger.info("cgc_tco audit-chain schema created/verified")
+        except Exception as e:
+            logger.error(f"cgc_tco schema provisioning failed (non-fatal, TCO logging will error until fixed): {e}")
 
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)
