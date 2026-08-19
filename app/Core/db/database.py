@@ -18,7 +18,7 @@ import re
 # PostgreSQL
 try:
     import psycopg2
-    from psycopg2.extras import RealDictCursor
+    from psycopg2.extras import RealDictCursor, Json
     from psycopg2 import pool
     POSTGRES_AVAILABLE = True
 except ImportError:
@@ -56,7 +56,8 @@ class Database:
         
         self._init_connection()
         self._create_tables()
-        
+        self._create_jla_schema()
+
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
     def _init_connection(self):
@@ -246,6 +247,220 @@ class Database:
 
             conn.commit()
             logger.info("All CGC governance tables created/verified")
+
+    def _create_jla_schema(self):
+        """
+        Governance calibration matrices (ECM/PFM/SDA/PAN/SCM), read at runtime
+        by CGCDBLoader (app/Core/db/cgc_db_loader.py) instead of the hardcoded
+        dicts it falls back to when this schema is unreachable. This schema
+        never existed in any database before -- CGC_DATABASE_URL was never
+        set, so every module silently ran on the single generic DEFAULT
+        fallback (confirmed by boot logs: "PFM v3.0.0 initialized with 1
+        risk models", same for PAN/SDA). Seeded here with the EXACT SAME
+        values as those Python fallback constants (a mechanical port, not
+        new calibration judgment) so behavior is unchanged today; real
+        per-area tuning (BANKING, HEALTHCARE, etc.) can now be added via
+        this schema without a redeploy.
+        """
+        if not self.use_postgres:
+            return
+
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_jla")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.ecm_calibration (
+                    id                      SERIAL PRIMARY KEY,
+                    governance_area         VARCHAR(50) NOT NULL UNIQUE,
+                    base_frameworks         JSONB NOT NULL,
+                    sensitivity_modulation  JSONB NOT NULL,
+                    compliance_owner_bonus  NUMERIC NOT NULL,
+                    critical_frameworks     JSONB NOT NULL,
+                    description             TEXT,
+                    is_active               BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.pfm_risk_models (
+                    id                            SERIAL PRIMARY KEY,
+                    governance_area               VARCHAR(50) NOT NULL,
+                    action_type                    VARCHAR(50) NOT NULL,
+                    baseline_risk                  INT NOT NULL,
+                    sensitivity_multiplier         NUMERIC NOT NULL,
+                    critical_factors               JSONB NOT NULL DEFAULT '[]',
+                    success_probability_baseline   NUMERIC,
+                    failure_modes                  JSONB NOT NULL DEFAULT '[]',
+                    is_active                      BOOLEAN NOT NULL DEFAULT TRUE,
+                    UNIQUE (governance_area, action_type)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.sda_best_practices (
+                    id                        SERIAL PRIMARY KEY,
+                    governance_area           VARCHAR(50) NOT NULL UNIQUE,
+                    data_requirements         JSONB NOT NULL DEFAULT '[]',
+                    quality_factors           JSONB NOT NULL DEFAULT '{}',
+                    risk_mitigations          JSONB NOT NULL DEFAULT '[]',
+                    optimization_priorities   JSONB NOT NULL DEFAULT '[]',
+                    is_active                 BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.pan_domain_patterns (
+                    id                       SERIAL PRIMARY KEY,
+                    governance_area          VARCHAR(50) NOT NULL UNIQUE,
+                    keywords                 JSONB NOT NULL DEFAULT '[]',
+                    patterns                 JSONB NOT NULL DEFAULT '{}',
+                    sensitivity_multiplier   NUMERIC NOT NULL DEFAULT 1.0,
+                    is_active                BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.tco_retention_policies (
+                    id                       SERIAL PRIMARY KEY,
+                    governance_area          VARCHAR(50) NOT NULL UNIQUE,
+                    retention_days           INT NOT NULL DEFAULT 365,
+                    compression_enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+                    archival_required        BOOLEAN NOT NULL DEFAULT FALSE,
+                    blockchain_sync          BOOLEAN NOT NULL DEFAULT FALSE,
+                    tamper_detection_level   VARCHAR(20) NOT NULL DEFAULT 'MEDIUM',
+                    description              TEXT,
+                    is_active                BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.scm_security_policies (
+                    id                             SERIAL PRIMARY KEY,
+                    governance_area                VARCHAR(50) NOT NULL UNIQUE,
+                    encryption_required             BOOLEAN NOT NULL DEFAULT TRUE,
+                    signing_required                BOOLEAN NOT NULL DEFAULT TRUE,
+                    fingerprint_required             BOOLEAN NOT NULL DEFAULT FALSE,
+                    min_key_rotation_days            INT NOT NULL DEFAULT 90,
+                    audit_log_required               BOOLEAN NOT NULL DEFAULT TRUE,
+                    chain_validation_strict          BOOLEAN NOT NULL DEFAULT FALSE,
+                    hash_algorithm                   VARCHAR(20) NOT NULL DEFAULT 'sha256',
+                    signing_algorithm                VARCHAR(30) NOT NULL DEFAULT 'rsa_pss_2048',
+                    double_encryption_threshold      INT NOT NULL DEFAULT 5,
+                    audit_retention_years            INT NOT NULL DEFAULT 2,
+                    description                      TEXT,
+                    is_active                        BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.scm_sensitivity_config (
+                    id                             SERIAL PRIMARY KEY,
+                    sensitivity_level              VARCHAR(20) NOT NULL UNIQUE,
+                    additional_encryption          BOOLEAN NOT NULL,
+                    compression_enabled            BOOLEAN NOT NULL,
+                    include_metadata               BOOLEAN NOT NULL,
+                    ttl_hours                      INT NOT NULL,
+                    require_compliance_owner_sig   BOOLEAN NOT NULL,
+                    is_active                      BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cgc_jla.scm_compliance_standards (
+                    id          SERIAL PRIMARY KEY,
+                    standard    VARCHAR(50) NOT NULL UNIQUE,
+                    is_active   BOOLEAN NOT NULL DEFAULT TRUE
+                )
+            """)
+
+            # Seed DEFAULT rows -- exact port of cgc_db_loader.py's
+            # _FALLBACK_* dicts and scmmodule.py's inline fallback dicts.
+            cur.execute("""
+                INSERT INTO cgc_jla.ecm_calibration
+                    (governance_area, base_frameworks, sensitivity_modulation,
+                     compliance_owner_bonus, critical_frameworks, description)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (governance_area) DO NOTHING
+            """, (
+                "DEFAULT",
+                Json({
+                    "transparency": 0.90, "fairness": 0.90, "accountability": 0.90,
+                    "privacy": 0.90, "security": 0.90, "compliance": 0.90,
+                    "sustainability": 0.80, "human_oversight": 0.90
+                }),
+                Json({
+                    "LOW":    {"multiplier": 1.0, "threshold": 0.80},
+                    "MEDIUM": {"multiplier": 0.97, "threshold": 0.85},
+                    "HIGH":   {"multiplier": 0.94, "threshold": 0.90}
+                }),
+                0.02,
+                Json(["accountability", "compliance"]),
+                "Default calibration (seeded from code fallback)"
+            ))
+
+            cur.execute("""
+                INSERT INTO cgc_jla.pfm_risk_models
+                    (governance_area, action_type, baseline_risk, sensitivity_multiplier,
+                     critical_factors, success_probability_baseline, failure_modes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (governance_area, action_type) DO NOTHING
+            """, ("DEFAULT", "default_action", 25, 1.2, Json([]), 0.85, Json([])))
+
+            cur.execute("""
+                INSERT INTO cgc_jla.sda_best_practices
+                    (governance_area, data_requirements, quality_factors,
+                     risk_mitigations, optimization_priorities)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (governance_area) DO NOTHING
+            """, ("DEFAULT", Json([]), Json({}), Json([]), Json(["compliance", "security"])))
+
+            cur.execute("""
+                INSERT INTO cgc_jla.pan_domain_patterns
+                    (governance_area, keywords, patterns, sensitivity_multiplier)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (governance_area) DO NOTHING
+            """, ("DEFAULT", Json([]), Json({}), 1.0))
+
+            cur.execute("""
+                INSERT INTO cgc_jla.tco_retention_policies
+                    (governance_area, retention_days, compression_enabled,
+                     archival_required, blockchain_sync, tamper_detection_level, description)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (governance_area) DO NOTHING
+            """, ("DEFAULT", 365, True, False, False, "MEDIUM",
+                  "Default retention policy (seeded from code fallback)"))
+
+            cur.execute("""
+                INSERT INTO cgc_jla.scm_security_policies
+                    (governance_area, encryption_required, signing_required,
+                     fingerprint_required, min_key_rotation_days, audit_log_required,
+                     chain_validation_strict, hash_algorithm, signing_algorithm,
+                     double_encryption_threshold, audit_retention_years, description)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (governance_area) DO NOTHING
+            """, ("DEFAULT", True, True, False, 90, True, False,
+                  "sha256", "rsa_pss_2048", 5, 2,
+                  "Fallback default policy (seeded from code fallback)"))
+
+            sensitivity_rows = [
+                ("LOW",    False, True,  False, 24, False),
+                ("MEDIUM", False, False, True,  12, False),
+                ("HIGH",   True,  False, True,  6,  True),
+            ]
+            for level, add_enc, compression, metadata, ttl, req_sig in sensitivity_rows:
+                cur.execute("""
+                    INSERT INTO cgc_jla.scm_sensitivity_config
+                        (sensitivity_level, additional_encryption, compression_enabled,
+                         include_metadata, ttl_hours, require_compliance_owner_sig)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (sensitivity_level) DO NOTHING
+                """, (level, add_enc, compression, metadata, ttl, req_sig))
+
+            standards = ["FIPS-140-2", "SOC2-Type2", "ISO27001", "HIPAA",
+                         "PCI-DSS-v3.2.1", "EU-GDPR", "EU-AI-Act"]
+            for standard in standards:
+                cur.execute("""
+                    INSERT INTO cgc_jla.scm_compliance_standards (standard)
+                    VALUES (%s)
+                    ON CONFLICT (standard) DO NOTHING
+                """, (standard,))
+
+            conn.commit()
+            logger.info("cgc_jla governance calibration schema created/verified + seeded")
 
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)
