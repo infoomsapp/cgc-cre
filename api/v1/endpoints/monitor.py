@@ -15,9 +15,11 @@ so this file has no auth logic of its own.
 
 import os
 import logging
+import time
+from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.Core.db.database import get_database
@@ -28,6 +30,30 @@ router = APIRouter()
 
 ALLOWED_APP_SOURCES = {"ledgiproof", "ledgiproof-tax-pro"}
 ALLOWED_SEVERITIES  = {"info", "warning", "error", "critical"}
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Rate limiting — POST /error was confirmed unbounded during a live pentest
+#  (15 concurrent requests, each a distinct fingerprint, all 200'd -- every
+#  caller shares one bearer token, so nothing before this stopped a leaked
+#  key, or a buggy client in a retry loop, from growing the table forever).
+#  In-memory sliding window, keyed by client IP. Not distributed across
+#  Vercel's serverless instances -- a real fix at this project's current
+#  scale would need Redis or a Postgres-backed counter -- but it caps abuse
+#  within any single warm instance, which is a real improvement over zero.
+# ─────────────────────────────────────────────────────────────────────────
+_RATE_LIMIT  = 20     # requests
+_RATE_WINDOW = 60.0   # seconds
+_rate_state: Dict[str, deque] = defaultdict(deque)
+
+def _check_rate_limit(key: str) -> bool:
+    now = time.monotonic()
+    window = _rate_state[key]
+    while window and window[0] < now - _RATE_WINDOW:
+        window.popleft()
+    if len(window) >= _RATE_LIMIT:
+        return False
+    window.append(now)
+    return True
 
 
 class ErrorReportIn(BaseModel):
@@ -44,7 +70,11 @@ class ErrorReportIn(BaseModel):
 
 
 @router.post("/error", summary="Ingest a client error report")
-async def report_error(payload: ErrorReportIn) -> Dict[str, Any]:
+async def report_error(payload: ErrorReportIn, request: Request) -> Dict[str, Any]:
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Too many error reports — slow down")
+
     if payload.app_source not in ALLOWED_APP_SOURCES:
         raise HTTPException(status_code=400, detail=f"Unknown app_source: {payload.app_source}")
     severity = payload.severity if payload.severity in ALLOWED_SEVERITIES else "error"
