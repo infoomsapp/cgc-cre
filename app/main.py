@@ -363,6 +363,35 @@ async def execute_governance_decision(
 
     return response
 
+# TEMPORARY -- exercises begin_intercept/seal_intercept end-to-end
+# (including the real DB write) in isolation from the pre-existing,
+# unrelated PreFilter.evaluate()/Agent bug in execute_governance_decision
+# above, which blocks reaching PoD in that endpoint entirely. Remove once
+# the fix is verified live via logs (look for "[PoDRepo] Atomic OK").
+@app.post("/pod/self-test", tags=["Governance"])
+async def pod_self_test(user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not app.pod:
+        raise HTTPException(status_code=503, detail="PoD interceptor not initialized")
+    decision_id = f"selftest_{secrets.token_hex(6)}"
+    intercept_id = app.pod.begin_intercept(
+        decision_id=decision_id,
+        tenant_id="pod-selftest",
+        model_identifier="pod-selftest/v1",
+        input_payload={"test": True}
+    )
+    triplet, block = await app.pod.seal_intercept(
+        intercept_id=intercept_id,
+        output_payload={"result": "ok"},
+        governance_outcome="APPROVE"
+    )
+    return {
+        "decision_id": decision_id,
+        "intercept_id": intercept_id,
+        "block_number": block.block_number,
+        "block_hash": block.block_hash,
+        "triplet_hash": triplet.triplet_hash,
+    }
+
 @app.get("/governance/modules/{module_name}/metrics", tags=["Governance"])
 async def get_module_metrics(
     module_name: str,
