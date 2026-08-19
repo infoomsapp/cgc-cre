@@ -195,8 +195,6 @@ class PoDRepository:
         self,
         triplet: "InterceptTriplet",
         block: "PoDBlock",
-        signing_key_db_id: str,
-        model_db_id: str
     ) -> bool:
         """
         Atomically persist InterceptTriplet + PoDBlock in one transaction.
@@ -213,27 +211,27 @@ class PoDRepository:
                     await conn.execute(
                         """
                         INSERT INTO cgc_pod.inference_intercepts (
-                            intercept_id, decision_id, tenant_id, model_id,
+                            intercept_id, decision_id, tenant_id,
                             input_payload_hash, model_identifier, output_payload_hash,
                             intercepted_at, delivery_at, latency_ms,
                             triplet_hash, triplet_signature, signing_key_id,
                             timestamp_token, timestamp_authority,
                             pii_detected, pii_fields_count
                         ) VALUES (
-                            $1,$2,$3,$4,$5,$6,$7,
-                            $8::TIMESTAMPTZ,$9::TIMESTAMPTZ,$10,
-                            $11,$12,$13,$14,$15,$16,$17
+                            $1,$2,$3,$4,$5,$6,
+                            $7::TIMESTAMPTZ,$8::TIMESTAMPTZ,$9,
+                            $10,$11,$12,$13,$14,$15,$16
                         )
                         ON CONFLICT (intercept_id) DO NOTHING
                         """,
                         triplet.intercept_id, triplet.decision_id,
-                        triplet.tenant_id, model_db_id,
+                        triplet.tenant_id,
                         triplet.input_payload_hash, triplet.model_identifier,
                         triplet.output_payload_hash,
                         triplet.intercepted_at, triplet.delivered_at,
                         triplet.latency_ms,
                         triplet.triplet_hash, triplet.triplet_signature,
-                        signing_key_db_id,
+                        triplet.signing_key_id,
                         triplet.timestamp_token, triplet.timestamp_authority,
                         triplet.pii_detected, triplet.pii_fields_count
                     )
@@ -267,6 +265,35 @@ class PoDRepository:
         except Exception as e:
             logger.error(f"[PoDRepo] TRANSACTION FAILED: {e}")
             return False
+
+    async def persist(
+        self,
+        triplet: "InterceptTriplet",
+        block: "PoDBlock",
+        decision_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Adapter used by PoDInterceptor.seal_intercept() -- that call site
+        expects a `persist(triplet=, block=, decision_id=)` method returning
+        block metadata, which this class never actually defined (it only had
+        save_intercept_and_block, a different name/signature) -- the
+        interceptor's DB persistence call has been silently failing and
+        falling back to in-memory-only every time it ran, since day one.
+        `decision_id` is already on both triplet and block; accepted here
+        only to match the caller's existing call convention.
+        """
+        ok = await self.save_intercept_and_block(triplet, block)
+        if not ok:
+            return None
+        return {"block_hash": block.block_hash, "block_number": block.block_number}
+
+    async def verify_chain(self, tenant_id: str) -> Dict[str, Any]:
+        """
+        Adapter used by PoDInterceptor.verify_chain_integrity() -- same gap
+        as persist() above, different method name (verify_chain vs the
+        actual run_integrity_verification).
+        """
+        return await self.run_integrity_verification(tenant_id)
 
     # ─────────────────────────────────────────────────────────────────────────
     # READ / FORENSIC

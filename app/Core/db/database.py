@@ -57,6 +57,7 @@ class Database:
         self._init_connection()
         self._create_tables()
         self._create_jla_schema()
+        self._create_pod_schema()
 
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
@@ -484,6 +485,115 @@ class Database:
                 logger.info("cgc_jla governance calibration schema created/verified + seeded")
         except Exception as e:
             logger.error(f"cgc_jla schema provisioning failed (non-fatal, calibration stays on Python fallback): {e}")
+
+    def _create_pod_schema(self):
+        """
+        Proof-of-Decision cryptographic chain persistence, read/written by
+        app/modules/pod/pod_repository.py (async, via its own asyncpg pool
+        on CGC_DATABASE_URL/DATABASE_URL -- separate connection from this
+        sync psycopg2 one, but the same underlying Postgres). Never existed
+        before: PoDInterceptor (app/modules/pod/pod_interceptor_v2.py) was
+        never wired into any live request path, so this schema had no
+        callers. Building it here so it's ready the moment that changes.
+
+        pod_ledger is append-only by design (the patent claim is a
+        tamper-evident chain) -- enforced with DB RULEs blocking UPDATE/
+        DELETE, not just application code.
+
+        Wrapped in try/except from the first version, per the lesson from
+        the cgc_jla outage earlier this session: a failure here must never
+        take down the whole app.
+        """
+        if not self.use_postgres:
+            return
+
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_pod")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_pod.inference_intercepts (
+                        intercept_id          TEXT PRIMARY KEY,
+                        decision_id           TEXT NOT NULL,
+                        tenant_id             TEXT NOT NULL,
+                        input_payload_hash    TEXT NOT NULL,
+                        model_identifier      TEXT NOT NULL,
+                        output_payload_hash   TEXT NOT NULL,
+                        intercepted_at        TIMESTAMPTZ NOT NULL,
+                        delivery_at           TIMESTAMPTZ,
+                        latency_ms            NUMERIC,
+                        triplet_hash          TEXT NOT NULL,
+                        triplet_signature     TEXT NOT NULL,
+                        signing_key_id        TEXT NOT NULL,
+                        timestamp_token       TEXT,
+                        timestamp_authority   TEXT,
+                        pii_detected          BOOLEAN NOT NULL DEFAULT FALSE,
+                        pii_fields_count      INT NOT NULL DEFAULT 0,
+                        created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_intercepts_decision
+                    ON cgc_pod.inference_intercepts (decision_id, tenant_id)
+                """)
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_pod.pod_ledger (
+                        block_uuid            TEXT PRIMARY KEY,
+                        tenant_id             TEXT NOT NULL,
+                        intercept_id          TEXT NOT NULL REFERENCES cgc_pod.inference_intercepts(intercept_id),
+                        decision_id           TEXT NOT NULL,
+                        block_number          INT NOT NULL,
+                        previous_block_hash   TEXT NOT NULL,
+                        block_hash            TEXT NOT NULL UNIQUE,
+                        triplet_hash          TEXT NOT NULL,
+                        governance_outcome    TEXT NOT NULL,
+                        compliance_score      NUMERIC,
+                        chain_height          INT,
+                        sealed_at             TIMESTAMPTZ NOT NULL,
+                        sealed_by             TEXT NOT NULL,
+                        tamper_detected       BOOLEAN NOT NULL DEFAULT FALSE
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ledger_tenant_block
+                    ON cgc_pod.pod_ledger (tenant_id, block_number)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ledger_decision
+                    ON cgc_pod.pod_ledger (decision_id, tenant_id)
+                """)
+                # Append-only: the whole point of a tamper-evident chain is
+                # that a sealed block can never be edited or removed.
+                cur.execute("""
+                    CREATE OR REPLACE RULE pod_ledger_no_update AS
+                        ON UPDATE TO cgc_pod.pod_ledger DO INSTEAD NOTHING
+                """)
+                cur.execute("""
+                    CREATE OR REPLACE RULE pod_ledger_no_delete AS
+                        ON DELETE TO cgc_pod.pod_ledger DO INSTEAD NOTHING
+                """)
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_pod.chain_integrity_log (
+                        id                      SERIAL PRIMARY KEY,
+                        tenant_id               TEXT NOT NULL,
+                        verified_from_block     INT,
+                        verified_to_block       INT,
+                        blocks_verified         INT NOT NULL,
+                        integrity_passed        BOOLEAN NOT NULL,
+                        broken_at_block         INT,
+                        verification_time_ms    NUMERIC,
+                        verified_by             TEXT,
+                        verified_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+
+                conn.commit()
+                logger.info("cgc_pod PoD chain schema created/verified")
+        except Exception as e:
+            logger.error(f"cgc_pod schema provisioning failed (non-fatal, PoD stays in-memory-only): {e}")
 
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)

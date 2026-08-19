@@ -323,7 +323,7 @@ class PoDInterceptor:
     # PHASE 2: Seal intercept (post-model, pre-client-delivery)
     # -------------------------------------------------------------------------
 
-    def seal_intercept(
+    async def seal_intercept(
         self,
         intercept_id: str,
         output_payload: Any,
@@ -402,7 +402,7 @@ class PoDInterceptor:
         db_meta: Optional[Dict] = None
         if self._repo:
             try:
-                db_meta = self._repo.persist(
+                db_meta = await self._repo.persist(
                     triplet=triplet,
                     block=block,
                     decision_id=pending["decision_id"]
@@ -426,7 +426,7 @@ class PoDInterceptor:
     # CHAIN VERIFICATION
     # -------------------------------------------------------------------------
 
-    def verify_chain_integrity(self, tenant_id: str) -> Dict[str, Any]:
+    async def verify_chain_integrity(self, tenant_id: str) -> Dict[str, Any]:
         """
         Verify the integrity of the entire PoD chain for a tenant.
 
@@ -438,7 +438,7 @@ class PoDInterceptor:
         # Use DB repo if available — it is the authoritative source
         if self._repo:
             try:
-                return self._repo.verify_chain(tenant_id)
+                return await self._repo.verify_chain(tenant_id)
             except Exception as e:
                 logger.error(f"[PoD] DB verification failed: {e} — using in-memory")
 
