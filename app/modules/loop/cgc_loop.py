@@ -560,7 +560,8 @@ class LOOP:
                 signed_artifact = self.scm.sign_artifact(
                     artifact=decision_artifact,
                     op_type="LOOP_DECISION",
-                    prefilter_result=prefilter_dict
+                    prefilter_result=prefilter_dict,
+                    tenant_id=org_id,
                 )
             
             # ================================================================
