@@ -15,11 +15,12 @@ from typing import Annotated, Any, Final, Optional, Dict, List
 from time import perf_counter_ns
 
 from fastapi import FastAPI, Depends, Request, Header, status, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, ConfigDict
 from fastapi.staticfiles import StaticFiles
 from fastapi import HTTPException
+from pathlib import Path
 
 # CGC CORE - Unified Governance System
 from app.Core.tenant.multi_tenant import tenant_manager
@@ -243,6 +244,19 @@ async def health() -> Dict[str, Any]:
     No auth, no DB dependency — just confirms the process is up and serving,
     which is all a deploy healthcheck should require."""
     return {"status": "ok", "version": "2.2.2"}
+
+# Read once at import time -- a static bundled asset, not a runtime write,
+# so this is safe on Vercel's read-only filesystem.
+_DASHBOARD_HTML = (Path(__file__).parent / "static" / "dashboard.html").read_text(encoding="utf-8")
+
+@app.get("/dashboard", tags=["System"], response_class=HTMLResponse)
+async def dashboard() -> HTMLResponse:
+    """CGC Core Monitoring Systems -- a self-contained static page (no
+    server-side auth on the shell itself). It prompts for a Bearer token
+    client-side and uses it to call the already-authenticated /monitor/*
+    and /status/nodes JSON endpoints directly from the browser. Temporary
+    home for this (v1) -- a dedicated page/app is the planned next step."""
+    return HTMLResponse(content=_DASHBOARD_HTML)
 
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:
