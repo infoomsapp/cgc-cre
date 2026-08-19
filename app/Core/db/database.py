@@ -622,6 +622,24 @@ class Database:
                     self._write_json_list('error_reports.json', reports)
                 return found
 
+    def delete_error_report(self, fingerprint: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM cgc_error_reports WHERE fingerprint = %s",
+                        (fingerprint,)
+                    )
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                reports = self._read_json_list('error_reports.json')
+                remaining = [r for r in reports if r.get('fingerprint') != fingerprint]
+                found = len(remaining) != len(reports)
+                if found:
+                    self._write_json_list('error_reports.json', remaining)
+                return found
+
     # ======================================================================
     # ANALYTICS & LEARNING QUERIES
     # ======================================================================

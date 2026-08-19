@@ -131,6 +131,15 @@ async def resolve_error(fingerprint: str) -> Dict[str, Any]:
     return {"resolved": True, "fingerprint": fingerprint}
 
 
+@router.delete("/errors/{fingerprint}", summary="Permanently delete an error report")
+async def delete_error(fingerprint: str) -> Dict[str, Any]:
+    db = get_database()
+    ok = db.delete_error_report(fingerprint)
+    if not ok:
+        raise HTTPException(status_code=404, detail="No error report with that fingerprint")
+    return {"deleted": True, "fingerprint": fingerprint}
+
+
 # ─────────────────────────────────────────────────────────────────────────
 #  Slack alerting — best-effort, no-ops cleanly if not configured.
 # ─────────────────────────────────────────────────────────────────────────

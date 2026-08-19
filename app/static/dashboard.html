@@ -199,7 +199,10 @@ async function refresh() {
         <td class="msg">${esc((r.message || '').slice(0, 140))}</td>
         <td>${esc(r.count)}</td>
         <td>${esc((r.last_seen || '').slice(0, 19).replace('T', ' '))}</td>
-        <td>${r.resolved ? '<span class="resolved-tag">resolved</span>' : `<button class="resolve-btn" onclick="resolveErr('${esc(r.fingerprint)}')">Resolve</button>`}</td>
+        <td>
+          ${r.resolved ? '<span class="resolved-tag">resolved</span>' : `<button class="resolve-btn" onclick="resolveErr('${esc(r.fingerprint)}')">Resolve</button>`}
+          <button class="resolve-btn" onclick="deleteErr('${esc(r.fingerprint)}')">Delete</button>
+        </td>
       </tr>
     `).join('') : `<tr><td colspan="6" class="empty">No errors reported</td></tr>`;
 
@@ -214,6 +217,17 @@ async function resolveErr(fp) {
   try {
     await fetch(API + '/monitor/errors/' + fp + '/resolve', {
       method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + TOKEN }
+    });
+    refresh();
+  } catch (e) {}
+}
+
+async function deleteErr(fp) {
+  if (!confirm('Permanently delete this error report?')) return;
+  try {
+    await fetch(API + '/monitor/errors/' + fp, {
+      method: 'DELETE',
       headers: { 'Authorization': 'Bearer ' + TOKEN }
     });
     refresh();
