@@ -117,7 +117,7 @@ class TCO:
 
     def __init__(
         self,
-        db_path: str = "data/audit_chain.db",
+        db_path: str = os.getenv("CGC_TCO_DB_PATH", "data/audit_chain.db"),
         genesis_seed: str = "CGC_CORE_GENESIS_2025"
     ):
         self.module_name = "TCO"

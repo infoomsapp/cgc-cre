@@ -33,7 +33,7 @@ class AuthSystem:
 
     def __init__(
         self,
-        data_dir: str = "./data",
+        data_dir: str = os.getenv("CGC_AUTH_DATA_DIR", "./data"),
         jwt_secret: Optional[str] = None,
         allowed_algorithms: Optional[List[str]] = None,
     ) -> None:
