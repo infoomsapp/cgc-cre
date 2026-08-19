@@ -140,6 +140,17 @@ async def delete_error(fingerprint: str) -> Dict[str, Any]:
     return {"deleted": True, "fingerprint": fingerprint}
 
 
+class BulkDeleteIn(BaseModel):
+    fingerprints: List[str] = Field(..., min_length=1, max_length=500)
+
+
+@router.post("/errors/bulk-delete", summary="Permanently delete multiple error reports in one call")
+async def bulk_delete_errors(payload: BulkDeleteIn) -> Dict[str, Any]:
+    db = get_database()
+    deleted = db.delete_error_reports(payload.fingerprints)
+    return {"deleted": deleted, "requested": len(payload.fingerprints)}
+
+
 # ─────────────────────────────────────────────────────────────────────────
 #  Slack alerting — best-effort, no-ops cleanly if not configured.
 # ─────────────────────────────────────────────────────────────────────────

@@ -640,6 +640,31 @@ class Database:
                     self._write_json_list('error_reports.json', remaining)
                 return found
 
+    def delete_error_reports(self, fingerprints: List[str]) -> int:
+        """Bulk variant of delete_error_report — same semantics, one round trip.
+        Reusable primitive: any future cleanup (pentest noise, stale test data,
+        a client's own "clear all" action) goes through this instead of a
+        client-side loop of single deletes."""
+        if not fingerprints:
+            return 0
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM cgc_error_reports WHERE fingerprint = ANY(%s)",
+                        (fingerprints,)
+                    )
+                    return cur.rowcount
+        else:
+            with self.json_lock:
+                reports = self._read_json_list('error_reports.json')
+                wanted = set(fingerprints)
+                remaining = [r for r in reports if r.get('fingerprint') not in wanted]
+                deleted = len(reports) - len(remaining)
+                if deleted:
+                    self._write_json_list('error_reports.json', remaining)
+                return deleted
+
     # ======================================================================
     # ANALYTICS & LEARNING QUERIES
     # ======================================================================
