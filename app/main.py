@@ -31,7 +31,7 @@ from app.Core.config import config
 from app.Core.logging import logging_config
 
 # Core Governance Modules
-from app.modules.prefilter.PreFilter import PreFilter
+from app.modules.prefilter.PreFilter import PreFilter, Agent, EnforcementContext
 from app.modules.scm.scmmodule import SCM
 from app.modules.ecm.ecmmodule import ECM
 from app.modules.pfm.pfmmodule import PFM
@@ -137,18 +137,48 @@ async def run_cgc_prefilter(
     user: Dict[str, Any]
 ) -> Any:
     """Ejecutar CGC-PreFilter."""
-    
-    # Contexto base de gobernanza
-    context = {
-        "user_id": user.get("id", user_email),
-        "user_roles": user.get("roles", ["user"]),
-        "action": action,
-        "data_domains": data_domains,
-        "correlation_id": f"corr_{secrets.token_hex(8)}"
-    }
+
+    # AuthSystem.verify_token() only ever returns {"email", "role"} (a single
+    # string, confirmed in auth_system.py) -- .get("roles", ...) here was
+    # checking a key that never exists, always silently falling back.
+    user_roles = [user.get("role", "user")]
+
+    # PreFilter.evaluate() requires a registered Agent (id/roles/scopes/
+    # owners/capabilities) to check RBAC/scopes against -- confirmed via
+    # full repo search that no agent registry exists anywhere (no DB table,
+    # no lookup class, no auth-token field); Agent is otherwise only ever
+    # constructed once, as demo data in PreFilter.py's __main__ block. This
+    # endpoint has no agent_id in its request shape either. Synthesizing a
+    # permissive per-request Agent that mirrors the caller's own already-
+    # authenticated role is the only thing there's real data for -- it
+    # makes agent_exists/user_rbac/scopes_exist trivially satisfied (agent
+    # roles == user roles, requested_scopes is empty) without inventing new
+    # access-control policy. A real agent registry, if this product ever
+    # needs distinct per-agent permissions, is a separate feature to build.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    agent = Agent(
+        id=f"agent-{org_id}",
+        name=f"{org_id} default agent",
+        status="PRODUCTION",
+        roles=user_roles,
+        scopes=[],
+        owners=[],
+        capabilities=[],
+        created_at=now_iso,
+        updated_at=now_iso,
+    )
+
+    context = EnforcementContext(
+        user_id=user.get("id", user_email),
+        user_roles=user_roles,
+        action=action,
+        data_domains=data_domains,
+        requested_scopes=[],
+        correlation_id=f"corr_{secrets.token_hex(8)}"
+    )
 
     # PREFILTER (ultra-fast <10ms)
-    result = app.prefilter.evaluate(context)
+    result = app.prefilter.evaluate(agent, context)
 
     # Save in DB for TCO
     app.db.save_prefilter_result(result.correlation_id, result.to_dict())
