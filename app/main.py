@@ -10,12 +10,12 @@ import io
 import json
 import base64
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Annotated, Any, Final, Optional, Dict, List
 from time import perf_counter_ns
 
 from fastapi import FastAPI, Depends, Request, Header, status, Form
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, ConfigDict
 from fastapi.staticfiles import StaticFiles
@@ -418,6 +418,36 @@ async def execute_governance_decision(
             logger.warning(f"[PoD] seal_intercept failed (non-fatal): {e}")
 
     return response
+
+
+@app.get("/governance/reports/{app_source}", tags=["Governance"])
+async def get_governance_report(
+    app_source: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    user=Depends(get_current_user)
+) -> Response:
+    """
+    On-demand per-app governance report (decision summary + full audit
+    chain) as an inline-viewable PDF, sourced from TCO's Postgres-backed
+    audit trail (cgc_tco.audit_trail).
+    """
+    if app_source not in ALLOWED_APP_SOURCES:
+        raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
+
+    if not to_date:
+        to_date = datetime.now(timezone.utc).date().isoformat()
+    if not from_date:
+        from_date = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
+
+    pdf_bytes = app.tco.generate_app_report_pdf(app_source, from_date, to_date)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="cgc_report_{app_source}_{from_date}_to_{to_date}.pdf"'}
+    )
+
 
 @app.get("/governance/modules/{module_name}/metrics", tags=["Governance"])
 async def get_module_metrics(
