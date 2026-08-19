@@ -214,7 +214,22 @@ class TCO:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_area ON audit_trail(area)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_trail(timestamp)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_block_number ON audit_trail(block_number)')
-            
+
+            # SQLite has no ADD COLUMN IF NOT EXISTS -- this is the standard
+            # safe idiom for a column added after the table already shipped.
+            # Neither existed before today: nothing identified which
+            # connected app (LedgiProof vs. Tax Pro) originated a decision,
+            # and "outcome" (APPROVE/REJECT/REQUIRE_HUMAN) was passed into
+            # log_decision() via decision_summary but never actually
+            # persisted. Both nullable -- rows written before this deploy
+            # stay NULL ("unattributed"), not an error.
+            cursor.execute("PRAGMA table_info(audit_trail)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            if "app_source" not in existing_cols:
+                cursor.execute("ALTER TABLE audit_trail ADD COLUMN app_source TEXT")
+            if "outcome" not in existing_cols:
+                cursor.execute("ALTER TABLE audit_trail ADD COLUMN outcome TEXT")
+
             # Chain integrity log (for tamper detection)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS chain_integrity_log (
@@ -253,7 +268,8 @@ class TCO:
         input_data: Dict[str, Any],
         prefilter_result: Dict[str, Any],
         decision_summary: Dict[str, Any],
-        loop_result: Optional[Dict[str, Any]] = None
+        loop_result: Optional[Dict[str, Any]] = None,
+        app_source: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Log governance decision with full context awareness.
@@ -292,6 +308,7 @@ class TCO:
             # ================================================================
             critical_framework_violated = decision_summary.get("critical_framework_violated", False)
             human_review_required = decision_summary.get("human_review_required", False)
+            outcome = decision_summary.get("outcome")
             
             # ================================================================
             # Build comprehensive audit entry
@@ -341,7 +358,9 @@ class TCO:
                 critical_framework_violated=critical_framework_violated,
                 human_review_required=human_review_required,
                 retention_days=policy["retention_days"],
-                tamper_detection_level=policy["tamper_detection_level"]
+                tamper_detection_level=policy["tamper_detection_level"],
+                app_source=app_source,
+                outcome=outcome
             )
             
             # Update chain state
@@ -438,13 +457,15 @@ class TCO:
         critical_framework_violated: bool,
         human_review_required: bool,
         retention_days: int,
-        tamper_detection_level: str
+        tamper_detection_level: str,
+        app_source: Optional[str] = None,
+        outcome: Optional[str] = None
     ):
         """Store audit entry in database."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
+
             cursor.execute('''
                 INSERT INTO audit_trail
                 (
@@ -452,15 +473,17 @@ class TCO:
                     sensitivity_level, action, data_hash, result_hash,
                     previous_hash, block_hash, compliance_owner_present,
                     critical_framework_violated, human_review_required,
-                    retention_days, tamper_detection_level, verified
+                    retention_days, tamper_detection_level, verified,
+                    app_source, outcome
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 block_number, timestamp, decision_id, module_source, area,
                 sensitivity_level, action, data_hash, result_hash,
                 previous_hash, block_hash, compliance_owner_present,
                 critical_framework_violated, human_review_required,
-                retention_days, tamper_detection_level, True
+                retention_days, tamper_detection_level, True,
+                app_source, outcome
             ))
             
             conn.commit()

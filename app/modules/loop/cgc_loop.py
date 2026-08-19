@@ -320,11 +320,12 @@ class LOOP:
         self,
         decision_id: str,
         module_source: str,
-        org_id: str,  
+        org_id: str,
         action: str,
         input_data: Dict[str, Any],
         prefilter_result: PreFilterResult,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        app_source: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute full governance cycle with context-aware decision making.
@@ -398,8 +399,9 @@ class LOOP:
                 module_source=module_source,
                 action=action,
                 input_data=input_data,
-                prefilter_result=prefilter_dict, 
-                decision_summary={"outcome": "REJECT", "reason": "TENANT_QUOTA_EXCEEDED"}
+                prefilter_result=prefilter_dict,
+                decision_summary={"outcome": "REJECT", "reason": "TENANT_QUOTA_EXCEEDED"},
+                app_source=app_source
             )
             return {
                 "approved": False,
@@ -637,7 +639,8 @@ class LOOP:
                     loop_result={
                         "module_scores": module_scores.to_dict(),
                         "aggregated_score": aggregated_score
-                    }
+                    },
+                    app_source=app_source
                 )
             
             # ================================================================

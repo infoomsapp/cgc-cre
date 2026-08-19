@@ -45,7 +45,7 @@ from app.modules.pod.pod_interceptor_v2 import PoDInterceptor
 from api.v1.endpoints.verify import router as verify_router
 
 # Application monitoring router (LedgiProof + LedgiProof Tax Pro client error reports).
-from api.v1.endpoints.monitor import router as monitor_router
+from api.v1.endpoints.monitor import router as monitor_router, ALLOWED_APP_SOURCES
 
 # Type Aliases (Python 3.12+)
 type AuditHash = str
@@ -327,10 +327,17 @@ async def execute_governance_decision(
     input_data: str = Form(...),
     user_email: str = Form(...),
     data_domains: str = Form(...),
+    app_source: str = Form("unknown"),
     user=Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Endpoint unificado para ejecutar decisiones de gobernanza."""
     start_time = perf_counter_ns()
+
+    # Optional with a default (not Form(...)) so any existing caller not
+    # yet sending it keeps working unbroken. Same naming convention as
+    # /monitor/error's app_source, reused here rather than invented fresh.
+    if app_source not in ALLOWED_APP_SOURCES:
+        app_source = "unknown"
 
     try:
         input_dict = json.loads(input_data)
@@ -386,6 +393,7 @@ async def execute_governance_decision(
             input_data=input_dict,
             prefilter_result=prefilter_result,
             context=None,
+            app_source=app_source,
         )
         total_latency = (perf_counter_ns() - start_time) / 1_000_000
         response = {
