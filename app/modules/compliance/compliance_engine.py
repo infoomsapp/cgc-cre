@@ -37,7 +37,10 @@ except ImportError:
         TCOModule = None
 
 
-class EUAIActRequirement(Enum):
+class EUAIActRequirement(str, Enum):
+    # str mixin: makes members JSON-serializable directly (json.dumps on
+    # asdict(profile) elsewhere in this module was always raising
+    # TypeError before this -- audit_report_path silently stayed None).
     DATA_REPRESENTATIVE = "data_representative"
     TRANSPARENCY = "transparency"
     HUMAN_OVERSIGHT = "human_oversight"

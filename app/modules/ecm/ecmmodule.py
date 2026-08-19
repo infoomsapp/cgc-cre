@@ -53,7 +53,14 @@ class ECM:
         # MIGRATED — config loaded from Supabase via CGCDBLoader
         from app.Core.db.cgc_db_loader import get_db_loader
         self._db_loader = get_db_loader()
-        
+        # get_metrics() and the `or` fallback in calibrate() both reference
+        # self.calibration_matrix -- it was never actually set as an instance
+        # attribute (AttributeError on every get_metrics() call). Only
+        # "DEFAULT" is ever populated (cgc_jla schema, seeded this session);
+        # real per-area entries are a future business decision, not invented
+        # here.
+        self.calibration_matrix = {"DEFAULT": {}}
+
         logger.info(f"{self.module_name} v{self.version} initialized with industrial calibration matrix")
 
 

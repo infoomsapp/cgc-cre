@@ -42,11 +42,6 @@ class AdviceResult:
     confidence: float
     
 
-    def _get_practices(self, area: str) -> dict:
-        """Load best practices from Supabase. Replaces AREA_BEST_PRACTICES[area]."""
-        return self._db_loader.get_sda(area)
-
-
     def to_dict(self) -> Dict[str, Any]:
         return {
             "quality_score": round(self.quality_score, 2),
@@ -125,6 +120,10 @@ class SDA:
             f"{len(self.area_practices)} area-specific practice sets"
         )
 
+    def _get_practices(self, area: str) -> dict:
+        """Load best practices from Supabase. Replaces AREA_BEST_PRACTICES[area]."""
+        return self._db_loader.get_sda(area)
+
     # ========================================================================
     # MAIN ADVISORY API
     # ========================================================================
@@ -172,7 +171,7 @@ class SDA:
             # ================================================================
             # Get area-specific practices
             # ================================================================
-            practices = self._get_practices(area, self.area_practices["DEFAULT"])
+            practices = self._get_practices(area)
             
             # ================================================================
             # Analyze current data
@@ -380,7 +379,7 @@ class SDA:
             }
         
         # Area-specific quality factors
-        practices = self._get_practices(area, self.area_practices["DEFAULT"])
+        practices = self._get_practices(area)
         quality_factors = practices.get("quality_factors", {})
         
         # Assess each factor
