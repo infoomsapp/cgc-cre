@@ -61,9 +61,15 @@ async def get_pool() -> Optional[Any]:
         logger.warning("[PoDRepo] asyncpg not installed — pip install asyncpg")
         return None
 
-    dsn = os.getenv(
-        "CGC_DATABASE_URL",
-        "postgresql://cgc_user:cgc_password@localhost:5432/cgc_core"
+    # Same fallback as cgc_db_loader.py: CGC_DATABASE_URL was never
+    # provisioned as a separate database -- cgc_pod lives in the same
+    # Postgres as DATABASE_URL (Database._create_pod_schema() creates it
+    # there). Falling back to DATABASE_URL means this works with zero new
+    # secrets.
+    dsn = (
+        os.getenv("CGC_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+        or "postgresql://cgc_user:cgc_password@localhost:5432/cgc_core"
     )
 
     try:
@@ -72,6 +78,12 @@ async def get_pool() -> Optional[Any]:
             min_size=2,
             max_size=10,
             command_timeout=30,
+            # Supabase's connection pooler runs PgBouncer in transaction
+            # mode, which doesn't support asyncpg's default server-side
+            # prepared statements (each "connection" can be a different
+            # backend per transaction) -- disabling the statement cache is
+            # the standard asyncpg+PgBouncer mitigation.
+            statement_cache_size=0,
             server_settings={"application_name": "cgc_pod_interceptor"}
         )
         logger.info("[PoDRepo] PostgreSQL connection pool established")
