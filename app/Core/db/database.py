@@ -275,7 +275,20 @@ class Database:
         try:
             with self.get_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_jla")
+
+                # The first attempt at this (b558674) crashed the whole app on
+                # an unrelated bug (no try/except around this method), but
+                # under Supabase's pooled connection some of its CREATE TABLE
+                # statements still landed before the crash -- leaving tables
+                # that exist but are missing the UNIQUE constraints this
+                # method relies on for ON CONFLICT, which then fails on every
+                # retry ("no unique or exclusion constraint matching the ON
+                # CONFLICT specification"). Safe to drop and recreate clean:
+                # this schema has never been successfully used -- every
+                # module has been running on the Python-side fallback the
+                # entire time, so there is no real calibration data to lose.
+                cur.execute("DROP SCHEMA IF EXISTS cgc_jla CASCADE")
+                cur.execute("CREATE SCHEMA cgc_jla")
 
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS cgc_jla.ecm_calibration (
