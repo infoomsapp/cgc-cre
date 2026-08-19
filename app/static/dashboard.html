@@ -97,9 +97,9 @@
 <div id="gate">
   <div class="card">
     <h1>CGC Core — Monitoring</h1>
-    <p>Pega tu Bearer token para conectar. Se guarda solo en este navegador.</p>
-    <input id="keyInput" type="password" placeholder="CGC_SERVICE_API_KEY o token" autocomplete="off">
-    <button onclick="connect()">Conectar</button>
+    <p>Paste your Bearer token to connect. Stored only in this browser.</p>
+    <input id="keyInput" type="password" placeholder="CGC_SERVICE_API_KEY or token" autocomplete="off">
+    <button onclick="connect()">Connect</button>
     <div class="err" id="gateErr"></div>
   </div>
 </div>
@@ -113,23 +113,23 @@
     <div class="right">
       <span id="dot"></span>
       <span class="sub" id="lastRefresh">—</span>
-      <button class="logout" onclick="disconnect()">Desconectar</button>
+      <button class="logout" onclick="disconnect()">Disconnect</button>
     </div>
   </header>
 
   <div class="cards" id="statCards"></div>
 
   <section>
-    <h2>Módulos de gobernanza</h2>
+    <h2>Governance Modules</h2>
     <div class="modgrid" id="modGrid"></div>
   </section>
 
   <section>
-    <h2>Errores recientes</h2>
+    <h2>Recent Errors</h2>
     <div class="tablewrap">
       <table id="errTable">
         <thead>
-          <tr><th>App</th><th>Severidad</th><th>Mensaje</th><th>Veces</th><th>Última vez</th><th></th></tr>
+          <tr><th>App</th><th>Severity</th><th>Message</th><th>Count</th><th>Last Seen</th><th></th></tr>
         </thead>
         <tbody id="errBody"></tbody>
       </table>
@@ -178,9 +178,9 @@ async function refresh() {
     document.getElementById('gateErr').textContent = '';
 
     document.getElementById('statCards').innerHTML = `
-      <div class="card"><div class="n">${stats.total_reports}</div><div class="l">Errores únicos (7d)</div></div>
-      <div class="card"><div class="n">${stats.total_occurrences}</div><div class="l">Ocurrencias totales</div></div>
-      <div class="card"><div class="n">${stats.unresolved}</div><div class="l">Sin resolver</div></div>
+      <div class="card"><div class="n">${stats.total_reports}</div><div class="l">Unique Errors (7d)</div></div>
+      <div class="card"><div class="n">${stats.total_occurrences}</div><div class="l">Total Occurrences</div></div>
+      <div class="card"><div class="n">${stats.unresolved}</div><div class="l">Unresolved</div></div>
       <div class="card"><div class="n">${(stats.by_app_source && stats.by_app_source.ledgiproof) || 0}</div><div class="l">LedgiProof</div></div>
       <div class="card"><div class="n">${(stats.by_app_source && stats.by_app_source['ledgiproof-tax-pro']) || 0}</div><div class="l">Tax Pro</div></div>
     `;
@@ -189,7 +189,7 @@ async function refresh() {
     document.getElementById('modGrid').innerHTML = Object.keys(mods).map(k => {
       const active = mods[k] && (mods[k].status === 'active' || mods[k].status === 'ACTIVE' || mods[k].total_evaluations !== undefined);
       return `<div class="mod"><span class="m-dot ${active ? '' : 'off'}"></span><span class="m-name">${esc(k)}</span></div>`;
-    }).join('') || '<div class="empty">Sin datos de módulos</div>';
+    }).join('') || '<div class="empty">No module data</div>';
 
     const rows = errs.reports || [];
     document.getElementById('errBody').innerHTML = rows.length ? rows.map(r => `
@@ -199,11 +199,11 @@ async function refresh() {
         <td class="msg">${esc((r.message || '').slice(0, 140))}</td>
         <td>${esc(r.count)}</td>
         <td>${esc((r.last_seen || '').slice(0, 19).replace('T', ' '))}</td>
-        <td>${r.resolved ? '<span class="resolved-tag">resuelto</span>' : `<button class="resolve-btn" onclick="resolveErr('${esc(r.fingerprint)}')">Resolver</button>`}</td>
+        <td>${r.resolved ? '<span class="resolved-tag">resolved</span>' : `<button class="resolve-btn" onclick="resolveErr('${esc(r.fingerprint)}')">Resolve</button>`}</td>
       </tr>
-    `).join('') : `<tr><td colspan="6" class="empty">Sin errores reportados</td></tr>`;
+    `).join('') : `<tr><td colspan="6" class="empty">No errors reported</td></tr>`;
 
-    document.getElementById('lastRefresh').textContent = 'actualizado ' + new Date().toLocaleTimeString();
+    document.getElementById('lastRefresh').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('dot').style.background = 'var(--red)';
     document.getElementById('lastRefresh').textContent = 'error: ' + e.message;
@@ -228,7 +228,7 @@ async function boot() {
   } catch (e) {
     document.getElementById('app').style.display = 'none';
     document.getElementById('gate').style.display = 'flex';
-    document.getElementById('gateErr').textContent = 'Token inválido o sin conexión.';
+    document.getElementById('gateErr').textContent = 'Invalid token or connection failed.';
     return;
   }
   refresh();
