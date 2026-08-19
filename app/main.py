@@ -348,7 +348,7 @@ async def execute_governance_decision(
             intercept_id = app.pod.begin_intercept(
                 decision_id=decision_id,
                 tenant_id=org_id,
-                model_identifier="cgc-governance/prefilter/v2.2.2",
+                model_identifier="cgc-governance/full-cycle/v2.2.2",
                 input_payload={"action": action, "input_data": input_dict, "data_domains": domains_list}
             )
         except Exception as e:
@@ -372,11 +372,29 @@ async def execute_governance_decision(
             "decision_id": decision_id
         }
     else:
+        # Full governance cycle: ECM/PFM/PAN/SDA scoring + aggregation,
+        # ComplianceEngine (EU AI Act), TCO audit log -- app.cgc_loop
+        # already implements all of this (execute_governance_cycle) but
+        # was never called from here; the endpoint used to stop after
+        # PreFilter alone. Sync call, no await -- same pattern as
+        # app.prefilter.evaluate() above.
+        loop_result = app.cgc_loop.execute_governance_cycle(
+            decision_id=decision_id,
+            module_source=user_email,
+            org_id=org_id,
+            action=action,
+            input_data=input_dict,
+            prefilter_result=prefilter_result,
+            context=None,
+        )
         total_latency = (perf_counter_ns() - start_time) / 1_000_000
         response = {
-            "approved": True,
+            "approved": loop_result.get("approved", False),
+            "outcome": loop_result.get("outcome"),
+            "reason": loop_result.get("reason"),
             "correlation_id": prefilter_result.correlation_id,
             "prefilter": prefilter_result.to_dict(),
+            "decision": loop_result,
             "total_latency_ms": round(total_latency, 2),
             "decision_id": decision_id
         }
@@ -386,7 +404,7 @@ async def execute_governance_decision(
             await app.pod.seal_intercept(
                 intercept_id=intercept_id,
                 output_payload=response,
-                governance_outcome=prefilter_result.outcome,
+                governance_outcome=response.get("outcome", prefilter_result.outcome),
             )
         except Exception as e:
             logger.warning(f"[PoD] seal_intercept failed (non-fatal): {e}")
