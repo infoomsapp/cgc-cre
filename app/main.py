@@ -363,51 +363,6 @@ async def execute_governance_decision(
 
     return response
 
-# TEMPORARY -- debug introspection to diagnose an asyncpg UUID type
-# inference error on cgc_pod.pod_ledger/inference_intercepts. Remove
-# together with /pod/self-test once the fix is confirmed.
-@app.get("/pod/self-test/schema-debug", tags=["Governance"])
-async def pod_schema_debug(user=Depends(get_current_user)) -> Dict[str, Any]:
-    with app.db.get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT table_name, column_name, data_type, udt_name
-            FROM information_schema.columns
-            WHERE table_schema = 'cgc_pod'
-            ORDER BY table_name, ordinal_position
-        """)
-        rows = cur.fetchall()
-    return {"columns": [dict(r) for r in rows]}
-
-# TEMPORARY -- exercises begin_intercept/seal_intercept end-to-end
-# (including the real DB write) in isolation from the pre-existing,
-# unrelated PreFilter.evaluate()/Agent bug in execute_governance_decision
-# above, which blocks reaching PoD in that endpoint entirely. Remove once
-# the fix is verified live via logs (look for "[PoDRepo] Atomic OK").
-@app.post("/pod/self-test", tags=["Governance"])
-async def pod_self_test(user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not app.pod:
-        raise HTTPException(status_code=503, detail="PoD interceptor not initialized")
-    decision_id = f"selftest_{secrets.token_hex(6)}"
-    intercept_id = app.pod.begin_intercept(
-        decision_id=decision_id,
-        tenant_id="pod-selftest",
-        model_identifier="pod-selftest/v1",
-        input_payload={"test": True}
-    )
-    triplet, block = await app.pod.seal_intercept(
-        intercept_id=intercept_id,
-        output_payload={"result": "ok"},
-        governance_outcome="APPROVE"
-    )
-    return {
-        "decision_id": decision_id,
-        "intercept_id": intercept_id,
-        "block_number": block.block_number,
-        "block_hash": block.block_hash,
-        "triplet_hash": triplet.triplet_hash,
-    }
-
 @app.get("/governance/modules/{module_name}/metrics", tags=["Governance"])
 async def get_module_metrics(
     module_name: str,
