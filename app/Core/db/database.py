@@ -565,14 +565,33 @@ class Database:
                     ON cgc_pod.pod_ledger (decision_id, tenant_id)
                 """)
                 # Append-only: the whole point of a tamper-evident chain is
-                # that a sealed block can never be edited or removed.
+                # that a sealed block can never be edited or removed. Uses a
+                # trigger, not a RULE -- Postgres flatly rejects any INSERT
+                # ... ON CONFLICT against a table that has rules ("INSERT with
+                # ON CONFLICT clause cannot be used with table that has
+                # INSERT or UPDATE rules"), and save_intercept_and_block's
+                # ON CONFLICT (block_hash) DO NOTHING needs to stay for safe
+                # retries. Triggers don't have that restriction.
+                # Drop the RULEs from the first (broken) version of this
+                # method -- they already landed on the real table and a
+                # bare CREATE TABLE IF NOT EXISTS above doesn't remove them.
+                cur.execute("DROP RULE IF EXISTS pod_ledger_no_update ON cgc_pod.pod_ledger")
+                cur.execute("DROP RULE IF EXISTS pod_ledger_no_delete ON cgc_pod.pod_ledger")
                 cur.execute("""
-                    CREATE OR REPLACE RULE pod_ledger_no_update AS
-                        ON UPDATE TO cgc_pod.pod_ledger DO INSTEAD NOTHING
+                    CREATE OR REPLACE FUNCTION cgc_pod.prevent_ledger_mutation()
+                    RETURNS TRIGGER AS $$
+                    BEGIN
+                        RAISE EXCEPTION 'cgc_pod.pod_ledger is append-only: % not permitted', TG_OP;
+                    END;
+                    $$ LANGUAGE plpgsql
                 """)
                 cur.execute("""
-                    CREATE OR REPLACE RULE pod_ledger_no_delete AS
-                        ON DELETE TO cgc_pod.pod_ledger DO INSTEAD NOTHING
+                    DROP TRIGGER IF EXISTS pod_ledger_append_only ON cgc_pod.pod_ledger
+                """)
+                cur.execute("""
+                    CREATE TRIGGER pod_ledger_append_only
+                    BEFORE UPDATE OR DELETE ON cgc_pod.pod_ledger
+                    FOR EACH ROW EXECUTE FUNCTION cgc_pod.prevent_ledger_mutation()
                 """)
 
                 cur.execute("""
