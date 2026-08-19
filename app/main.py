@@ -39,6 +39,7 @@ from app.modules.pan.panmodule import PAN
 from app.modules.sda.sdamodule import SDA
 from app.modules.tco.tcomodule import TCO
 from app.modules.loop.cgc_loop import LOOP
+from app.modules.pod.pod_interceptor_v2 import PoDInterceptor
 
 # Forensic verify router (PoD chain integrity + per-decision proof).
 from api.v1.endpoints.verify import router as verify_router
@@ -82,7 +83,17 @@ class CGCCoreEngine(FastAPI):
         # Orchestration & Compliance
         self.cgc_loop = LOOP()
         self.compliance_engine = ComplianceEngine(self.scm, self.tco) if self.scm and self.tco else None
-        
+
+        # Proof-of-Decision: pre-delivery cryptographic non-repudiation.
+        # Instantiation itself never touches the DB (persistence is lazy,
+        # per-call), so this can't block startup -- guarded anyway per the
+        # cgc_jla-outage lesson: nothing new added to __init__ goes in bare.
+        try:
+            self.pod = PoDInterceptor(signing_key_id="cgc-pod-v1")
+        except Exception as e:
+            logger.warning(f"[PoD] Interceptor init failed (non-fatal, decisions proceed unsealed): {e}")
+            self.pod = None
+
 
 app = CGCCoreEngine(
     title="CGC CORE - Enterprise Governance Gateway",
@@ -290,13 +301,29 @@ async def execute_governance_decision(
 ) -> Dict[str, Any]:
     """Endpoint unificado para ejecutar decisiones de gobernanza."""
     start_time = perf_counter_ns()
-    
+
     try:
         input_dict = json.loads(input_data)
         domains_list = json.loads(data_domains)
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-    
+
+    # Proof-of-Decision: capture the input hash BEFORE the decision is made,
+    # so the eventual proof can't be fabricated after the fact. Sealed once
+    # the outcome (ALLOW or blocked) is known, further down.
+    decision_id = f"dec_{secrets.token_hex(8)}"
+    intercept_id = None
+    if app.pod:
+        try:
+            intercept_id = app.pod.begin_intercept(
+                decision_id=decision_id,
+                tenant_id=org_id,
+                model_identifier="cgc-governance/prefilter/v2.2.2",
+                input_payload={"action": action, "input_data": input_dict, "data_domains": domains_list}
+            )
+        except Exception as e:
+            logger.warning(f"[PoD] begin_intercept failed (non-fatal): {e}")
+
     prefilter_result = await run_cgc_prefilter(
         org_id=org_id,
         user_email=user_email,
@@ -304,24 +331,37 @@ async def execute_governance_decision(
         data_domains=domains_list,
         user=user
     )
-    
+
     if prefilter_result.outcome != "ALLOW":
-        return {
+        response = {
             "approved": False,
             "stage": "prefilter",
             "outcome": prefilter_result.outcome,
             "reason": prefilter_result.reason,
-            "correlation_id": prefilter_result.correlation_id
+            "correlation_id": prefilter_result.correlation_id,
+            "decision_id": decision_id
         }
-    
-    total_latency = (perf_counter_ns() - start_time) / 1_000_000
-    
-    return {
-        "approved": True,
-        "correlation_id": prefilter_result.correlation_id,
-        "prefilter": prefilter_result.to_dict(),
-        "total_latency_ms": round(total_latency, 2)
-    }
+    else:
+        total_latency = (perf_counter_ns() - start_time) / 1_000_000
+        response = {
+            "approved": True,
+            "correlation_id": prefilter_result.correlation_id,
+            "prefilter": prefilter_result.to_dict(),
+            "total_latency_ms": round(total_latency, 2),
+            "decision_id": decision_id
+        }
+
+    if app.pod and intercept_id:
+        try:
+            await app.pod.seal_intercept(
+                intercept_id=intercept_id,
+                output_payload=response,
+                governance_outcome=prefilter_result.outcome,
+            )
+        except Exception as e:
+            logger.warning(f"[PoD] seal_intercept failed (non-fatal): {e}")
+
+    return response
 
 @app.get("/governance/modules/{module_name}/metrics", tags=["Governance"])
 async def get_module_metrics(
