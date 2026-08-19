@@ -41,6 +41,22 @@ if TYPE_CHECKING:
     from app.modules.pod.pod_interceptor import InterceptTriplet, PoDBlock
 
 
+def _ledger_uid(value: str) -> str:
+    """
+    cgc_pod.pod_ledger pre-dates this session (confirmed via a live
+    information_schema check -- it was never created by this codebase) and
+    its tenant_id/decision_id columns are UUID-typed, but the application
+    generates both as arbitrary strings (caller-supplied org_id, a
+    prefixed decision token). uuid5 gives a stable, reproducible mapping
+    without changing either side, so every write and every read filters
+    through this same conversion. intercept_id is already a real UUID
+    (str(uuid.uuid4()) in begin_intercept) and is used as-is everywhere,
+    since it already matches the value stored in inference_intercepts for
+    forensic_lookup's JOIN.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, value))
+
+
 # ============================================================================
 # CONNECTION POOL
 # ============================================================================
@@ -160,7 +176,7 @@ class PoDRepository:
                     ORDER  BY block_number DESC
                     LIMIT  1
                     """,
-                    tenant_id
+                    _ledger_uid(tenant_id)
                 )
                 return row["block_hash"] if row else GENESIS
         except Exception as e:
@@ -178,7 +194,7 @@ class PoDRepository:
                     FROM   cgc_pod.pod_ledger
                     WHERE  tenant_id = $1
                     """,
-                    tenant_id
+                    _ledger_uid(tenant_id)
                 )
                 return int(row["next_num"]) if row else 0
         except Exception as e:
@@ -192,7 +208,7 @@ class PoDRepository:
                     return 0
                 row = await conn.fetchrow(
                     "SELECT COUNT(*) AS h FROM cgc_pod.pod_ledger WHERE tenant_id = $1",
-                    tenant_id
+                    _ledger_uid(tenant_id)
                 )
                 return int(row["h"]) if row else 0
         except Exception as e:
@@ -269,8 +285,8 @@ class PoDRepository:
                         )
                         ON CONFLICT (block_hash) DO NOTHING
                         """,
-                        block.block_uuid, block.tenant_id,
-                        block.intercept_id, block.decision_id,
+                        block.block_uuid, _ledger_uid(block.tenant_id),
+                        block.intercept_id, _ledger_uid(block.decision_id),
                         block.block_number, block.previous_block_hash,
                         block.block_hash, block.triplet_hash,
                         block.governance_outcome, block.compliance_score,
@@ -338,7 +354,7 @@ class PoDRepository:
                       AND  block_number <= $3
                     ORDER  BY block_number ASC
                     """,
-                    tenant_id, from_block, to_block
+                    _ledger_uid(tenant_id), from_block, to_block
                 )
                 return [dict(r) for r in rows]
         except Exception as e:
@@ -372,10 +388,10 @@ class PoDRepository:
                         ii.pii_detected, ii.pii_fields_count
                     FROM   cgc_pod.pod_ledger pl
                     JOIN   cgc_pod.inference_intercepts ii
-                           ON pl.intercept_id = ii.intercept_id
+                           ON pl.intercept_id::text = ii.intercept_id
                     WHERE  pl.decision_id = $1 AND pl.tenant_id = $2
                     """,
-                    decision_id, tenant_id
+                    _ledger_uid(decision_id), _ledger_uid(tenant_id)
                 )
                 if not row:
                     return None
