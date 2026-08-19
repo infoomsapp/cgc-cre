@@ -65,6 +65,11 @@
 
   section { margin-bottom: 24px; }
   section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+  .sectionhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .sectionhead h2 { margin: 0; }
+  .bulk-delete-btn { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; }
+  .bulk-delete-btn:disabled { opacity: 0.35; cursor: default; }
+  th.checkcol, td.checkcol { width: 32px; }
 
   .modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap: 8px; }
   .mod { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }
@@ -125,11 +130,14 @@
   </section>
 
   <section>
-    <h2>Recent Errors</h2>
+    <div class="sectionhead">
+      <h2>Recent Errors</h2>
+      <button class="bulk-delete-btn" id="bulkDeleteBtn" onclick="bulkDeleteSelected()" disabled>Delete Selected (0)</button>
+    </div>
     <div class="tablewrap">
       <table id="errTable">
         <thead>
-          <tr><th>App</th><th>Severity</th><th>Message</th><th>Count</th><th>Last Seen</th><th></th></tr>
+          <tr><th class="checkcol"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)"></th><th>App</th><th>Severity</th><th>Message</th><th>Count</th><th>Last Seen</th><th></th></tr>
         </thead>
         <tbody id="errBody"></tbody>
       </table>
@@ -141,6 +149,7 @@
 const API = window.location.origin;
 let TOKEN = localStorage.getItem('cgc_dash_token') || '';
 let timer = null;
+let selected = new Set();
 
 function connect() {
   const v = document.getElementById('keyInput').value.trim();
@@ -191,9 +200,11 @@ async function refresh() {
       return `<div class="mod"><span class="m-dot ${active ? '' : 'off'}"></span><span class="m-name">${esc(k)}</span></div>`;
     }).join('') || '<div class="empty">No module data</div>';
 
+    selected = new Set([...selected].filter(fp => (errs.reports || []).some(r => r.fingerprint === fp)));
     const rows = errs.reports || [];
     document.getElementById('errBody').innerHTML = rows.length ? rows.map(r => `
       <tr>
+        <td class="checkcol"><input type="checkbox" data-fp="${esc(r.fingerprint)}" onchange="toggleRow('${esc(r.fingerprint)}', this.checked)" ${selected.has(r.fingerprint) ? 'checked' : ''}></td>
         <td>${esc(r.app_source)}</td>
         <td><span class="pill ${esc(r.severity)}">${esc(r.severity)}</span></td>
         <td class="msg">${esc((r.message || '').slice(0, 140))}</td>
@@ -204,7 +215,9 @@ async function refresh() {
           <button class="resolve-btn" onclick="deleteErr('${esc(r.fingerprint)}')">Delete</button>
         </td>
       </tr>
-    `).join('') : `<tr><td colspan="6" class="empty">No errors reported</td></tr>`;
+    `).join('') : `<tr><td colspan="7" class="empty">No errors reported</td></tr>`;
+    document.getElementById('selectAll').checked = rows.length > 0 && selected.size === rows.length;
+    updateBulkBtn();
 
     document.getElementById('lastRefresh').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
@@ -230,6 +243,42 @@ async function deleteErr(fp) {
       method: 'DELETE',
       headers: { 'Authorization': 'Bearer ' + TOKEN }
     });
+    refresh();
+  } catch (e) {}
+}
+
+function toggleRow(fp, checked) {
+  if (checked) selected.add(fp); else selected.delete(fp);
+  const all = document.querySelectorAll('#errBody input[type=checkbox]');
+  document.getElementById('selectAll').checked = all.length > 0 && selected.size === all.length;
+  updateBulkBtn();
+}
+
+function toggleSelectAll(checkbox) {
+  document.querySelectorAll('#errBody input[type=checkbox]').forEach(cb => {
+    cb.checked = checkbox.checked;
+    if (checkbox.checked) selected.add(cb.dataset.fp); else selected.delete(cb.dataset.fp);
+  });
+  updateBulkBtn();
+}
+
+function updateBulkBtn() {
+  const btn = document.getElementById('bulkDeleteBtn');
+  btn.textContent = `Delete Selected (${selected.size})`;
+  btn.disabled = selected.size === 0;
+}
+
+async function bulkDeleteSelected() {
+  const fingerprints = [...selected];
+  if (!fingerprints.length) return;
+  if (!confirm(`Permanently delete ${fingerprints.length} error report(s)?`)) return;
+  try {
+    await fetch(API + '/monitor/errors/bulk-delete', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fingerprints })
+    });
+    selected.clear();
     refresh();
   } catch (e) {}
 }
