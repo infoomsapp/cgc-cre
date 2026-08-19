@@ -538,6 +538,16 @@ class Database:
                     ON cgc_pod.inference_intercepts (decision_id, tenant_id)
                 """)
 
+                # NOTE: this table already existed in the real database
+                # before this method was ever written (confirmed live via
+                # information_schema) -- IF NOT EXISTS makes this a no-op
+                # here. Its real columns differ from what's declared below
+                # (tenant_id/intercept_id/decision_id are UUID, plus extra
+                # block_id/merkle_root/last_verified_at columns) -- see
+                # pod_repository.py's _ledger_uid() for how the app
+                # reconciles its string-based IDs with that. Left as
+                # documentation of the shape a fresh database would get;
+                # never actually executes against this project's DB.
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS cgc_pod.pod_ledger (
                         block_uuid            TEXT PRIMARY KEY,
