@@ -214,6 +214,15 @@ class PoDRepository:
         The pod_ledger insert is effectively immutable — DB RULE prevents
         any future UPDATE or DELETE on that table.
         """
+        def _ts(iso_str: Optional[str]):
+            # InterceptTriplet/PoDBlock store timestamps as ISO strings
+            # (needed for JSON serialization elsewhere); unlike psycopg2,
+            # asyncpg's binary protocol resolves $N::TIMESTAMPTZ params to
+            # a strict `timestamptz` codec that rejects a plain str -- it
+            # needs a real datetime.datetime, converted only here at the
+            # DB-write boundary.
+            return datetime.fromisoformat(iso_str) if iso_str else None
+
         try:
             async with get_connection(triplet.tenant_id) as conn:
                 if conn is None:
@@ -240,7 +249,7 @@ class PoDRepository:
                         triplet.tenant_id,
                         triplet.input_payload_hash, triplet.model_identifier,
                         triplet.output_payload_hash,
-                        triplet.intercepted_at, triplet.delivered_at,
+                        _ts(triplet.intercepted_at), _ts(triplet.delivered_at),
                         triplet.latency_ms,
                         triplet.triplet_hash, triplet.triplet_signature,
                         triplet.signing_key_id,
@@ -265,7 +274,7 @@ class PoDRepository:
                         block.block_number, block.previous_block_hash,
                         block.block_hash, block.triplet_hash,
                         block.governance_outcome, block.compliance_score,
-                        block.block_number, block.sealed_at, block.sealed_by
+                        block.block_number, _ts(block.sealed_at), block.sealed_by
                     )
 
                 logger.info(
