@@ -5,6 +5,8 @@ Production Ready - OlympusMont Systems LLC
 """
 
 import json
+import os
+import tempfile
 from datetime import datetime
 from typing import Dict, List, Any
 from dataclasses import dataclass, asdict
@@ -189,22 +191,30 @@ class ComplianceEngine:
             ))
         return bom
 
-    def generate_pre_audit_report(self, profile: NISTProfile, format: str = 'json') -> str:
+    def generate_pre_audit_report(self, profile: NISTProfile, format: str = 'json', tenant_id: str = "default") -> str:
         """
         Generate a pre-audit report in JSON or PDF format.
         """
         if format == 'pdf':
-            return self._generate_pdf_report(profile)
+            return self._generate_pdf_report(profile, tenant_id)
         return json.dumps(asdict(profile), indent=2)
 
-    def _generate_pdf_report(self, profile: NISTProfile) -> str:
+    def _generate_pdf_report(self, profile: NISTProfile, tenant_id: str = "default") -> str:
         """
         Generate a PDF report suitable for CE Marking and audit trails.
         """
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         filename = f"cgc_compliance_report_{timestamp.replace(':', '-')}.pdf"
+        # Used to write straight into the process CWD -- fails outright on
+        # Vercel's read-only filesystem (caught upstream in LOOP, but
+        # audit_report_path stayed null on every real request as a result).
+        # tempfile.gettempdir() is always writable and portable (Vercel:
+        # /tmp, local dev: OS temp dir) -- no new env var needed.
+        reports_dir = os.path.join(tempfile.gettempdir(), "cgc_reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        filepath = os.path.join(reports_dir, filename)
 
-        doc = SimpleDocTemplate(filename, pagesize=letter)
+        doc = SimpleDocTemplate(filepath, pagesize=letter)
         styles = getSampleStyleSheet()
         story = []
 
@@ -233,11 +243,22 @@ class ComplianceEngine:
             ])
         story.append(Table(checklist_data))
 
-        signature = self.scm.sign_data(json.dumps(asdict(profile)).encode())
-        story.append(Paragraph(f"Digital Signature: {signature.hex()[:32]}...", styles['Normal']))
+        # sign_data(data: str, tenant_id: str, ...) -> Dict, not raw bytes --
+        # this used to call it with a single positional arg (missing the
+        # required tenant_id) and pre-encoded bytes where a str is
+        # expected, then treat the returned dict as if it were raw
+        # signature bytes (.hex()) -- would have raised on every real call
+        # even once actually reached.
+        if self.scm:
+            signature_result = self.scm.sign_data(
+                json.dumps(asdict(profile), default=str, sort_keys=True),
+                tenant_id,
+                context={"operation": "COMPLIANCE_PDF_REPORT"},
+            )
+            story.append(Paragraph(f"Digital Signature: {signature_result['signature'][:32]}...", styles['Normal']))
 
         doc.build(story)
-        return filename
+        return filepath
 
     def _check_data_representative(self, decision: Dict) -> Dict:
         """

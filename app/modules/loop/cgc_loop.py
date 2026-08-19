@@ -598,7 +598,7 @@ class LOOP:
                     # Auto-genera PDF report
                     try:
                         report_path = self.compliance.generate_pre_audit_report(
-                            compliance_result.profile, 'pdf'
+                            compliance_result.profile, 'pdf', tenant_id=org_id
                         )
                         signed_artifact["audit_report_path"] = report_path
                     except Exception as e:
