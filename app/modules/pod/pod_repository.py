@@ -104,8 +104,12 @@ async def get_connection(tenant_id: Optional[str] = None):
 
     async with pool.acquire() as conn:
         if tenant_id:
+            # set_config() is parameterizable (unlike `SET LOCAL var = 'value'`,
+            # which doesn't support bind params) -- SQL injection fix:
+            # tenant_id traces back to client-supplied org_id, and this used
+            # to be an f-string interpolated straight into raw SQL.
             await conn.execute(
-                f"SET LOCAL cgc.current_tenant_id = '{tenant_id}'"
+                "SELECT set_config('cgc.current_tenant_id', $1, true)", tenant_id
             )
         yield conn
 

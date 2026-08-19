@@ -49,8 +49,12 @@ async def verify_decision(
     try:
         conn = await _get_conn()
 
-        # Set tenant context for RLS
-        await conn.execute(f"SET LOCAL cgc.current_tenant_id = '{x_tenant_id}'")
+        # Set tenant context for RLS. set_config() is parameterizable (unlike
+        # `SET LOCAL var = 'value'`, which is a DDL-like statement Postgres
+        # doesn't support bind params for) -- SQL injection fix: x_tenant_id
+        # is unauthenticated, attacker-controlled header input, and this used
+        # to be an f-string interpolated straight into raw SQL.
+        await conn.execute("SELECT set_config('cgc.current_tenant_id', $1, true)", x_tenant_id)
 
         # Main forensic query — joins decisions + pod_chain + prefilter
         row = await conn.fetchrow(
