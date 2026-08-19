@@ -921,6 +921,32 @@ class SCM:
         logger.info(f"[SCM] Security policy for {area}: {policy['description']}")
         return policy
 
+    def check_entry_policy(
+        self,
+        action: str,
+        input_data: Dict[str, Any],
+        prefilter_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Entry-point gate consulted by LOOP.execute_governance_cycle() before
+        running the core governance modules. Never existed on this class --
+        LOOP was written calling self.scm.check_entry_policy(...), which
+        meant every real governance decision failed at this exact first
+        SCM call, before ECM/PFM/PAN/SDA ever ran. Permissive pass-through
+        that surfaces the area's security policy; real entry-rejection
+        criteria (e.g. reject unsigned high-sensitivity requests) is a
+        future security/business decision, not invented here.
+        """
+        area = (prefilter_result or {}).get("areaIdentified", "DEFAULT")
+        policy = self.get_security_policy(area)
+        return {
+            "approved": True,
+            "reason": "Entry policy check passed",
+            "area": area,
+            "action": action,
+            "policy": policy,
+        }
+
     def get_encryption_config(self, sensitivity_level: str) -> Dict[str, Any]:
         """Return encryption configuration for sensitivity level."""
         config = self._get_sensitivity_config(sensitivity_level)
@@ -1082,6 +1108,29 @@ class SCM:
             self.metrics["signing_errors"] += 1
             logger.error(f"[SCM] Signing error: {e}")
             raise RuntimeError(f"signing_failed: {str(e)}") from e
+
+    def sign_artifact(
+        self,
+        artifact: Dict[str, Any],
+        op_type: str,
+        prefilter_result: Optional[Dict[str, Any]] = None,
+        tenant_id: str = "default",
+    ) -> Dict[str, Any]:
+        """
+        Signs a governance decision artifact for LOOP.execute_governance_cycle()
+        -- same gap as check_entry_policy above: LOOP was written calling
+        self.scm.sign_artifact(...), which never existed, so decisions never
+        reached a signed state. Delegates to the real sign_data() (the same
+        method /audit/seal already uses) and attaches the signature onto a
+        copy of the artifact rather than mutating the caller's dict.
+        """
+        payload = json.dumps(artifact, sort_keys=True, default=str)
+        signature_result = self.sign_data(
+            payload, tenant_id, context={"operation": op_type}
+        )
+        signed = dict(artifact)
+        signed["signature"] = signature_result
+        return signed
 
     def verify_signature(
         self,
