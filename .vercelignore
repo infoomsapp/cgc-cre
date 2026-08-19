@@ -1,6 +1,13 @@
 # Local dev-only artifacts -- never needed in the deployed function.
 # (Vercel's filesystem is read-only at runtime anyway, so shipping these
 # wastes bundle size without ever being usable.)
+#
+# .env is the important one here: without this, the local dev secrets
+# file gets bundled straight into the deployment and read at runtime --
+# confirmed live (the crash traceback showed a real Supabase connection
+# string that no one had configured as an actual Vercel env var).
+.env
+.env.*
 data/*.db
 data/*.db-*
 data/*.json
