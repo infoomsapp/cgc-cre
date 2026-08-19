@@ -63,11 +63,6 @@ class AuditEntry:
     tamper_detection_level: str
     
 
-    def _get_retention(self, area: str) -> dict:
-        """Load retention policy from Supabase. Replaces AUDIT_RETENTION_POLICIES[area]."""
-        return self._db_loader.get_tco(area)
-
-
     def to_dict(self) -> Dict[str, Any]:
         return {
             "decision_id": self.decision_id,
@@ -159,6 +154,10 @@ class TCO:
             f"Last block: {self.last_block_hash[:16]}... | "
             f"Genesis: {self._get_genesis_hash()[:16]}..."
         )
+
+    def _get_retention(self, area: str) -> dict:
+        """Load retention policy from Supabase. Replaces AUDIT_RETENTION_POLICIES[area]."""
+        return self._db_loader.get_tco(area)
 
     # ========================================================================
     # DATABASE INITIALIZATION
@@ -286,7 +285,7 @@ class TCO:
             sensitivity_level = self._determine_sensitivity_level(sensitive_count, area)
             
             # Get retention policy for this area
-            policy = self._get_retention(area, self.retention_policies["DEFAULT"])
+            policy = self._get_retention(area)
             
             # ================================================================
             # Extract compliance info from decision

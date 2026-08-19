@@ -117,7 +117,7 @@ class PAN:
             # ================================================================
             # Get domain-specific patterns
             # ================================================================
-            domain_config = self._get_patterns(area, self.domain_patterns["DEFAULT"])
+            domain_config = self._get_patterns(area)
             
             # ================================================================
             # Extract features
@@ -281,7 +281,7 @@ class PAN:
         detected_domain = self._detect_domain(text_content, area)
         
         # Extract key concepts based on area
-        domain_config = self._get_patterns(area, self.domain_patterns["DEFAULT"])
+        domain_config = self._get_patterns(area)
         key_concepts = self._extract_key_concepts(text_content, domain_config["keywords"])
         
         # Assess risk indicators
