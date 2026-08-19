@@ -115,16 +115,9 @@ class CGCDBLoader:
         self._conn = None
         self._cache: Dict[str, Dict] = {}
         self._loaded = False
-        # CGC_DATABASE_URL was never actually provisioned as a separate
-        # database -- the cgc_jla calibration schema lives in the same
-        # Postgres as DATABASE_URL (app/Core/db/database.py's Database
-        # class creates it). Falling back to DATABASE_URL means this
-        # works with zero new secrets; CGC_DATABASE_URL remains available
-        # for the day this genuinely needs to be a separate DB.
-        self._dsn = (
-            os.getenv("CGC_DATABASE_URL")
-            or os.getenv("DATABASE_URL")
-            or "postgresql://cgc_user:cgc_password@localhost:5432/cgc_core"
+        self._dsn = os.getenv(
+            "CGC_DATABASE_URL",
+            "postgresql://cgc_user:cgc_password@localhost:5432/cgc_core"
         )
 
     def _get_conn(self):
