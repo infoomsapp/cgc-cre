@@ -363,6 +363,22 @@ async def execute_governance_decision(
 
     return response
 
+# TEMPORARY -- debug introspection to diagnose an asyncpg UUID type
+# inference error on cgc_pod.pod_ledger/inference_intercepts. Remove
+# together with /pod/self-test once the fix is confirmed.
+@app.get("/pod/self-test/schema-debug", tags=["Governance"])
+async def pod_schema_debug(user=Depends(get_current_user)) -> Dict[str, Any]:
+    with app.db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT table_name, column_name, data_type, udt_name
+            FROM information_schema.columns
+            WHERE table_schema = 'cgc_pod'
+            ORDER BY table_name, ordinal_position
+        """)
+        rows = cur.fetchall()
+    return {"columns": [dict(r) for r in rows]}
+
 # TEMPORARY -- exercises begin_intercept/seal_intercept end-to-end
 # (including the real DB write) in isolation from the pre-existing,
 # unrelated PreFilter.evaluate()/Agent bug in execute_governance_decision
