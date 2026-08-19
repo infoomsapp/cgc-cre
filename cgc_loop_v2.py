@@ -18,7 +18,13 @@ from app.Core.logging import get_logger
 from app.modules.prefilter import PreFilterResult
 
 # FIX 2 — PoD: Pre-delivery cryptographic interceptor
-from app.modules.pod.pod_interceptor import PoDInterceptor
+# NOTE: this whole file (cgc_loop_v2.py) is not imported by anything in the
+# live app -- app/modules/loop/cgc_loop.py's LOOP class is the real
+# orchestrator wired into main.py. This import was pointing at a module
+# that doesn't exist (pod_interceptor vs. pod_interceptor_v2); fixed for
+# hygiene since it's directly related to the PoD work, not because this
+# file is reachable.
+from app.modules.pod.pod_interceptor_v2 import PoDInterceptor
 from app.modules.jla.model_registry import get_model_registry, ModelRegistry
 
 # Inicializar logger primero
