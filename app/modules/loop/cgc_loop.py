@@ -439,22 +439,35 @@ class LOOP:
             # ================================================================
             # STEP 2: Execute Core Modules (Parallel-ready, using PreFilter context)
             # ================================================================
-            pan_result = self.pan.analyze(input_data=input_data, context=context) if self.pan else {}
+            # PAN runs first -- its output (feature_confidence, data_quality_score)
+            # feeds PFM/SDA for higher-fidelity scoring. action/prefilter_result
+            # were missing from this call entirely (action has no default on
+            # PAN.analyze() -- TypeError on every real request, confirmed live);
+            # pan_result was computed but never threaded into PFM/SDA below,
+            # despite both already accepting it.
+            pan_result = self.pan.analyze(
+                action=action,
+                input_data=input_data,
+                prefilter_result=prefilter_dict,
+                context=context
+            ) if self.pan else {}
             ecm_result = self.ecm.calibrate(
                 action=action,
                 data=input_data,
-                prefilter_result=prefilter_dict,  
+                prefilter_result=prefilter_dict,
                 context=context
             ) if self.ecm else {}
             pfm_result = self.pfm.predict(
                 action=action,
                 input_data=input_data,
-                prefilter_result=prefilter_dict,  
+                prefilter_result=prefilter_dict,
+                pan_result=pan_result,
                 context=context
             ) if self.pfm else {}
             sda_result = self.sda.advise(
-                current_data=input_data, 
-                prefilter_result=prefilter_dict,  
+                current_data=input_data,
+                prefilter_result=prefilter_dict,
+                pan_result=pan_result,
                 context=context
             ) if self.sda else {}
             

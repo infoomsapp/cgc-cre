@@ -76,11 +76,21 @@ class Database:
             except Exception as e:
                 logger.warning(f"PostgreSQL failed, using JSON: {e}")
         
-        # JSON fallback (development only)
+        # JSON fallback (development only) -- NOT safe on Vercel's read-only
+        # filesystem outside /tmp. Confirmed live: when DATABASE_URL is
+        # configured but the pool transiently fails to establish (seen
+        # under a burst of concurrent cold starts), reaching this branch
+        # used to crash the ENTIRE app import (OSError: Read-only file
+        # system: 'data'), taking down every route on that instance
+        # instead of just this one degraded cold start. Catching it here
+        # means a transient Postgres hiccup degrades gracefully instead.
         self.use_postgres = False
-        os.makedirs(self.data_dir, exist_ok=True)
-        self._init_json_files()
-        logger.warning("JSON fallback active (DEVELOPMENT ONLY)")
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            self._init_json_files()
+            logger.warning("JSON fallback active (DEVELOPMENT ONLY)")
+        except Exception as e:
+            logger.error(f"JSON fallback also unavailable (read-only filesystem?): {e}")
 
     def _init_json_files(self):
         """Initialize JSON files for fallback mode."""
