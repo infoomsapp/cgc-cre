@@ -1,0 +1,15 @@
+# Local dev-only artifacts -- never needed in the deployed function.
+# (Vercel's filesystem is read-only at runtime anyway, so shipping these
+# wastes bundle size without ever being usable.)
+data/*.db
+data/*.db-*
+data/*.json
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.git/
+node_modules/
