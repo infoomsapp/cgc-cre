@@ -246,7 +246,14 @@ class SignIn(BaseModel):
 
 @app.post("/auth/signup", tags=["Auth"])
 async def signup(data: SignUp):
-    app.auth.create_user(data.email, data.password, data.name, data.role)
+    # Was create_user(data.email, data.password, data.name, data.role) --
+    # create_user's real signature is (email, password, role, created_by),
+    # so every signup positionally stuffed `name` into the `role` slot and
+    # `role` into `created_by`. `name` has no field on the user record at
+    # all (create_user never accepted one), so it's dropped here rather
+    # than invented a home for it -- same practical effect as before
+    # (silently unused), just without corrupting `role` in the process.
+    app.auth.create_user(data.email, data.password, role=data.role)
     return {"message": "User created successfully"}
 
 @app.post("/auth/signin", tags=["Auth"])
