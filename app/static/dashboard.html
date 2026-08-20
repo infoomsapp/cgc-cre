@@ -103,6 +103,19 @@
   .reportControls .btn { width: auto; padding: 9px 18px; }
   .reportViewerCard { display: none; padding: 0; overflow: hidden; }
   #reportViewer { width: 100%; height: 640px; border: none; display: block; }
+
+  .flowCards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap: 14px; }
+  .flowCard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .flowCard .flowHead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .flowCard .flowApp { font-size: 12.5px; font-weight: 700; letter-spacing: 0.02em; }
+  .flowCard .flowNum { font-family: var(--mono); font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .flowCard .flowNum.good { color: var(--green); }
+  .flowCard .flowNum.warn { color: var(--amber); }
+  .flowCard .flowNum.bad { color: var(--red); }
+  .flowSignals { display: flex; flex-direction: column; gap: 6px; }
+  .flowSignal { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--muted); }
+  .flowSignal .fsVal { font-family: var(--mono); color: var(--text); white-space: nowrap; }
+  .flowSignal.info { opacity: 0.7; font-style: italic; }
 </style>
 </head>
 <body>
@@ -135,6 +148,11 @@
   <section>
     <h2>Governance Modules</h2>
     <div class="modgrid" id="modGrid"></div>
+  </section>
+
+  <section>
+    <h2>Business Flow Scoring</h2>
+    <div class="flowCards" id="flowCards"></div>
   </section>
 
   <section>
@@ -209,13 +227,54 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function fmtPct(x) {
+  return (x === null || x === undefined) ? '—' : (x * 100).toFixed(1) + '%';
+}
+
+function scoreClass(score) {
+  if (score === null || score === undefined) return '';
+  if (score >= 80) return 'good';
+  if (score >= 60) return 'warn';
+  return 'bad';
+}
+
+function renderFlowCard(appLabel, data) {
+  if (!data || data.insufficient_data) {
+    const have = data ? data.sample_sizes.baseline_total : 0;
+    return `
+      <div class="flowCard">
+        <div class="flowHead"><span class="flowApp">${esc(appLabel)}</span><span class="flowNum">—</span></div>
+        <div class="empty" style="padding:8px 0;">Not enough decision history yet (${esc(have)}/10 baseline decisions)</div>
+      </div>`;
+  }
+  const s = data.signals;
+  return `
+    <div class="flowCard">
+      <div class="flowHead">
+        <span class="flowApp">${esc(appLabel)}</span>
+        <span class="flowNum ${scoreClass(data.flow_score)}">${esc(data.flow_score)}</span>
+      </div>
+      <div class="flowSignals">
+        <div class="flowSignal"><span>Approval rate</span><span class="fsVal">${fmtPct(s.approval_drift.current_rate)} (was ${fmtPct(s.approval_drift.baseline_rate)})</span></div>
+        <div class="flowSignal"><span>Velocity</span><span class="fsVal">${esc(s.velocity_spike.current_per_day)}/day (was ${esc(s.velocity_spike.baseline_per_day)}/day)</span></div>
+        <div class="flowSignal"><span>High-sensitivity share</span><span class="fsVal">${fmtPct(s.sensitivity_creep.current_rate)} (was ${fmtPct(s.sensitivity_creep.baseline_rate)})</span></div>
+        <div class="flowSignal info"><span>Human-review load</span><span class="fsVal">${fmtPct(s.human_review_load.current_rate)} (was ${fmtPct(s.human_review_load.baseline_rate)})</span></div>
+      </div>
+    </div>`;
+}
+
 async function refresh() {
   try {
-    const [stats, errs, nodes] = await Promise.all([
+    const [stats, errs, nodes, flowLp, flowLtp] = await Promise.all([
       api('/monitor/errors/stats?days=7'),
       api('/monitor/errors?limit=50'),
       api('/status/nodes'),
+      api('/flow-score/ledgiproof'),
+      api('/flow-score/ledgiproof-tax-pro'),
     ]);
+
+    document.getElementById('flowCards').innerHTML =
+      renderFlowCard('LedgiProof', flowLp) + renderFlowCard('LedgiProof Tax Pro', flowLtp);
     document.getElementById('dot').style.background = 'var(--green)';
     document.getElementById('gateErr').textContent = '';
 
