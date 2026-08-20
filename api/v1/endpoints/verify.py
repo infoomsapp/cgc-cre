@@ -1,9 +1,9 @@
 """
 GET /api/v1/verify/{decision_id}
 
-Endpoint forense: prueba criptográfica de cualquier decisión AI.
-Retorna el PoD block, triplet hash, firma RSA, y estado de la cadena.
-Este es el "demo de 30 segundos" para auditores y clientes enterprise.
+Forensic endpoint: cryptographic proof of any AI decision.
+Returns the PoD block, triplet hash, RSA signature, and chain status.
+This is the "30-second demo" for auditors and enterprise clients.
 """
 
 from fastapi import APIRouter, HTTPException, Header, Query
@@ -24,26 +24,26 @@ async def _get_conn():
 
 @router.get(
     "/{decision_id}",
-    summary="Verificar decisión AI",
+    summary="Verify an AI decision",
     description="""
-    Retorna prueba criptográfica completa de una decisión de governance.
-    Incluye: PoD block hash, triplet signature, RFC 3161 timestamp,
-    posición en la cadena inmutable, y estado de tamper-detection.
+    Returns full cryptographic proof of a governance decision.
+    Includes: PoD block hash, triplet signature, RFC 3161 timestamp,
+    position in the immutable chain, and tamper-detection status.
     """,
-    response_description="Forensic audit record con non-repudiation proof"
+    response_description="Forensic audit record with non-repudiation proof"
 )
 async def verify_decision(
     decision_id: str,
-    x_tenant_id: str = Header(..., description="Tenant ID del cliente"),
-    include_chain_proof: bool = Query(False, description="Incluir posición completa en la cadena")
+    x_tenant_id: str = Header(..., description="Client tenant ID"),
+    include_chain_proof: bool = Query(False, description="Include the full chain position")
 ):
     """
-    Endpoint forense principal.
-    Cualquier auditor con el decision_id puede verificar:
-    - Qué modelo AI tomó la decisión
-    - Exactamente cuándo (pre-delivery timestamp)
-    - Cuál fue el outcome
-    - Que el registro no fue alterado (chain integrity)
+    Main forensic endpoint.
+    Any auditor holding the decision_id can verify:
+    - Which AI model made the decision
+    - Exactly when (pre-delivery timestamp)
+    - What the outcome was
+    - That the record hasn't been altered (chain integrity)
     """
     conn = None
     try:
@@ -102,7 +102,7 @@ async def verify_decision(
                 detail={
                     "error": "decision_not_found",
                     "decision_id": decision_id,
-                    "message": "No se encontró la decisión para este tenant"
+                    "message": "No decision found for this tenant"
                 }
             )
 
@@ -197,18 +197,18 @@ async def verify_decision(
 
 @router.get(
     "/chain/integrity",
-    summary="Verificar integridad de toda la cadena PoD",
-    description="Recorre todos los bloques del tenant y verifica linkage de hashes."
+    summary="Verify the integrity of the whole PoD chain",
+    description="Walks every block for the tenant and verifies hash linkage."
 )
 async def verify_chain_integrity(
     x_tenant_id: str = Header(..., description="Tenant ID"),
-    from_block: int = Query(0, description="Bloque de inicio"),
-    to_block: int = Query(999999999, description="Bloque de fin")
+    from_block: int = Query(0, description="Starting block"),
+    to_block: int = Query(999999999, description="Ending block")
 ):
     """
-    Verifica que ningún bloque fue alterado en la cadena PoD.
-    Retorna integrity_passed: true/false y el bloque donde se detectó
-    la primera ruptura si la hay.
+    Verifies that no block in the PoD chain has been altered.
+    Returns integrity_passed: true/false and the block where the first
+    break was detected, if any.
     """
     conn = None
     try:
@@ -229,7 +229,7 @@ async def verify_chain_integrity(
                 "tenant_id":       x_tenant_id,
                 "blocks_verified": 0,
                 "integrity_passed": True,
-                "message":         "No hay bloques en el rango especificado"
+                "message":         "No blocks in the specified range"
             }
 
         GENESIS = "0" * 64

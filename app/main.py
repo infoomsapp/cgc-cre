@@ -201,7 +201,7 @@ async def run_cgc_prefilter(
 # =========================
 @app.get("/status/nodes", tags=["Governance"])
 async def get_sentinel_health(user=Depends(get_current_user)) -> JSONResponse:
-    """Health check de todos los módulos de gobernanza."""
+    """Health check across all governance modules."""
     results: Dict[str, SentinelResponse] = {}
     
     # PreFilter (First Layer)
@@ -312,7 +312,7 @@ async def dashboard() -> HTMLResponse:
 
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:
-    """Root endpoint con información del sistema unificado."""
+    """Root endpoint with unified system information."""
     return {
         "engine": "CGC CORE v2.2.2 + UNIFIED GOVERNANCE",
         "compliance": "EU_AI_ACT_2025_COMPLIANT",
@@ -341,7 +341,7 @@ async def execute_governance_decision(
     app_source: str = Form("unknown"),
     user=Depends(get_current_user)
 ) -> Dict[str, Any]:
-    """Endpoint unificado para ejecutar decisiones de gobernanza."""
+    """Unified endpoint for executing governance decisions."""
     start_time = perf_counter_ns()
 
     # Optional with a default (not Form(...)) so any existing caller not
@@ -465,7 +465,7 @@ async def get_module_metrics(
     module_name: str,
     user=Depends(get_current_user)
 ) -> Dict[str, Any]:
-    """Obtener métricas de un módulo específico de gobernanza."""
+    """Get metrics for a specific governance module."""
     module_map = {
         "prefilter": app.prefilter,
         "ecm": app.ecm,
@@ -490,7 +490,7 @@ async def seal_governance_decision(
     payload: Dict[str, Any],
     user=Depends(get_current_user)
 ) -> Dict[str, AuditHash]:
-    """Sellar decisión de gobernanza usando SCM."""
+    """Seal a governance decision using SCM."""
     timestamp = datetime.now(timezone.utc).isoformat()
     
     if app.scm and hasattr(app.scm, 'sign_data'):
