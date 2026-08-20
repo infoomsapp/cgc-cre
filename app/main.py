@@ -47,6 +47,10 @@ from api.v1.endpoints.verify import router as verify_router
 # Application monitoring router (LedgiProof + LedgiProof Tax Pro client error reports).
 from api.v1.endpoints.monitor import router as monitor_router, ALLOWED_APP_SOURCES
 
+# Business-flow scoring router (read-only aggregation over the TCO ledger — Phase 1
+# of the CGC Core reinforcement plan).
+from api.v1.endpoints.flow_score import router as flow_score_router
+
 # Type Aliases (Python 3.12+)
 type AuditHash = str
 type SentinelResponse = Dict[str, Any]
@@ -125,6 +129,13 @@ async def require_admin(user=Depends(get_current_user)):
 # at the router level so monitor.py itself carries no auth logic.
 app.include_router(
     monitor_router, prefix="/monitor", tags=["Monitoring"],
+    dependencies=[Depends(get_current_user)]
+)
+
+# Mount the business-flow scoring router → /flow-score/{app_source}
+# Read-only over the already-sealed TCO ledger; no write path touched.
+app.include_router(
+    flow_score_router, prefix="/flow-score", tags=["Flow Scoring"],
     dependencies=[Depends(get_current_user)]
 )
 
