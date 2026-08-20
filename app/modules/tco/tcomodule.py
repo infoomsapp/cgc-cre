@@ -171,11 +171,12 @@ class TCO:
         prefilter_result: Dict[str, Any],
         decision_summary: Dict[str, Any],
         loop_result: Optional[Dict[str, Any]] = None,
-        app_source: Optional[str] = None
+        app_source: Optional[str] = None,
+        tenant_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Log governance decision with full context awareness.
-        
+
         Args:
             decision_id: Unique decision identifier
             module_source: Originating agent/service
@@ -184,7 +185,9 @@ class TCO:
             prefilter_result: PreFilter output (area, sensitivity, etc.)
             decision_summary: Decision outcome (approved, reason, etc.)
             loop_result: Loop Decision output (scores, weighting, etc.)
-        
+            app_source: Which connected app this decision came from
+            tenant_id: Organization/tenant ID the decision was made for
+
         Returns:
             Audit log entry with block hash and verification status
         """
@@ -211,6 +214,7 @@ class TCO:
             critical_framework_violated = decision_summary.get("critical_framework_violated", False)
             human_review_required = decision_summary.get("human_review_required", False)
             outcome = decision_summary.get("outcome")
+            aggregated_score = decision_summary.get("aggregated_score")
             
             # ================================================================
             # Build comprehensive audit entry
@@ -262,7 +266,9 @@ class TCO:
                 retention_days=policy["retention_days"],
                 tamper_detection_level=policy["tamper_detection_level"],
                 app_source=app_source,
-                outcome=outcome
+                outcome=outcome,
+                tenant_id=tenant_id,
+                aggregated_score=aggregated_score
             )
             
             # Update chain state
@@ -361,7 +367,9 @@ class TCO:
         retention_days: int,
         tamper_detection_level: str,
         app_source: Optional[str] = None,
-        outcome: Optional[str] = None
+        outcome: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        aggregated_score: Optional[float] = None
     ):
         """Store audit entry in database."""
         try:
@@ -378,16 +386,16 @@ class TCO:
                         previous_hash, block_hash, compliance_owner_present,
                         critical_framework_violated, human_review_required,
                         retention_days, tamper_detection_level, verified,
-                        app_source, outcome
+                        app_source, outcome, tenant_id, aggregated_score
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ''', (
                     block_number, timestamp, decision_id, module_source, area,
                     sensitivity_level, action, data_hash, result_hash,
                     previous_hash, block_hash, compliance_owner_present,
                     critical_framework_violated, human_review_required,
                     retention_days, tamper_detection_level, True,
-                    app_source, outcome
+                    app_source, outcome, tenant_id, aggregated_score
                 ))
 
         except Exception as e:

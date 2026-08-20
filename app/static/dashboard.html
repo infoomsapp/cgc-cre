@@ -237,6 +237,10 @@ function fmtPct(x) {
   return (x === null || x === undefined) ? '—' : (x * 100).toFixed(1) + '%';
 }
 
+function fmtStddev(x) {
+  return (x === null || x === undefined) ? 'n/a' : x.toFixed(3);
+}
+
 function scoreClass(score) {
   if (score === null || score === undefined) return '';
   if (score >= 80) return 'good';
@@ -264,6 +268,7 @@ function renderFlowCard(appLabel, data) {
         <div class="flowSignal"><span>Approval rate</span><span class="fsVal">${fmtPct(s.approval_drift.current_rate)} (was ${fmtPct(s.approval_drift.baseline_rate)})</span></div>
         <div class="flowSignal"><span>Velocity</span><span class="fsVal">${esc(s.velocity_spike.current_per_day)}/day (was ${esc(s.velocity_spike.baseline_per_day)}/day)</span></div>
         <div class="flowSignal"><span>High-sensitivity share</span><span class="fsVal">${fmtPct(s.sensitivity_creep.current_rate)} (was ${fmtPct(s.sensitivity_creep.baseline_rate)})</span></div>
+        <div class="flowSignal"><span>Score volatility</span><span class="fsVal">${fmtStddev(s.score_volatility.current_stddev)} (was ${fmtStddev(s.score_volatility.baseline_stddev)})</span></div>
         <div class="flowSignal info"><span>Human-review load</span><span class="fsVal">${fmtPct(s.human_review_load.current_rate)} (was ${fmtPct(s.human_review_load.baseline_rate)})</span></div>
       </div>
     </div>`;

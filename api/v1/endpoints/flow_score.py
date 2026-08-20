@@ -11,7 +11,7 @@ router-mount level in main.py (dependencies=[Depends(get_current_user)]),
 so this file has no auth logic of its own - same pattern as monitor.py.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -26,6 +26,7 @@ async def get_flow_score(
     app_source: str,
     window_days: int = Query(7, ge=1, le=90),
     baseline_days: int = Query(30, ge=7, le=180),
+    tenant_id: Optional[str] = Query(None, description="Narrow to one organization within app_source"),
 ) -> Dict[str, Any]:
     if app_source not in ALLOWED_APP_SOURCES:
         raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
@@ -35,5 +36,5 @@ async def get_flow_score(
     # import chain.
     flow_scoring = FlowScoring()
     return flow_scoring.compute_flow_score(
-        app_source, window_days=window_days, baseline_days=baseline_days
+        app_source, window_days=window_days, baseline_days=baseline_days, tenant_id=tenant_id
     )

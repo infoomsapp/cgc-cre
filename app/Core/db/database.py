@@ -692,6 +692,19 @@ class Database:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_block_number ON cgc_tco.audit_trail(block_number)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_app_source ON cgc_tco.audit_trail(app_source)")
 
+                # Additive, nullable columns -- closes the gap flagged when
+                # flow-scoring shipped: org_id was already available at the
+                # log_decision() call site but never persisted, so "per
+                # tenant" flow-scoring could only ever mean "per app_source".
+                # aggregated_score was likewise computed but discarded after
+                # hashing, so "score volatility" wasn't buildable. Neither
+                # column is part of the block-hash input (see
+                # TCO._generate_block_hash), so this cannot affect the
+                # existing hash chain or verify_chain() for any row, old or new.
+                cur.execute("ALTER TABLE cgc_tco.audit_trail ADD COLUMN IF NOT EXISTS tenant_id TEXT")
+                cur.execute("ALTER TABLE cgc_tco.audit_trail ADD COLUMN IF NOT EXISTS aggregated_score NUMERIC")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tco_tenant_id ON cgc_tco.audit_trail(tenant_id)")
+
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS cgc_tco.chain_integrity_log (
                         id                      SERIAL PRIMARY KEY,
