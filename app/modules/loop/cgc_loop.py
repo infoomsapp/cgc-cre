@@ -401,7 +401,8 @@ class LOOP:
                 input_data=input_data,
                 prefilter_result=prefilter_dict,
                 decision_summary={"outcome": "REJECT", "reason": "TENANT_QUOTA_EXCEEDED"},
-                app_source=app_source
+                app_source=app_source,
+                tenant_id=org_id
             )
             return {
                 "approved": False,
@@ -640,7 +641,8 @@ class LOOP:
                         "module_scores": module_scores.to_dict(),
                         "aggregated_score": aggregated_score
                     },
-                    app_source=app_source
+                    app_source=app_source,
+                    tenant_id=org_id
                 )
             
             # ================================================================
