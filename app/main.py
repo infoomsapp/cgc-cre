@@ -250,10 +250,25 @@ async def signup(data: SignUp):
     return {"message": "User created successfully"}
 
 @app.post("/auth/signin", tags=["Auth"])
-async def signin(data: SignIn):
-    token = app.auth.create_session_token(data.email, data.password)
-    user_info = app.auth.verify_token(token)
-    return {"access_token": token, "token_type": "bearer", "user": user_info}
+async def signin(data: SignIn, request: Request):
+    # Was calling app.auth.create_session_token(...), a method that never
+    # existed on AuthSystem -- every real signin attempt 500'd before this
+    # fix. AuthSystem.login() is the real method: bcrypt password check,
+    # already-built in-memory brute-force protection (5 attempts / 15min
+    # lockout per IP, plus an is_blocked() IP/email blocklist check), JWT
+    # issuance, session storage -- all of it was dead code until this call
+    # site actually reached it.
+    client_ip = request.client.host if request.client else None
+    result = app.auth.login(data.email, data.password, ip=client_ip)
+
+    if not result.get("success"):
+        if result.get("rate_limited"):
+            raise HTTPException(status_code=429, detail=result["error"])
+        if result.get("blocked"):
+            raise HTTPException(status_code=403, detail=result["error"])
+        raise HTTPException(status_code=401, detail=result["error"])
+
+    return {"access_token": result["token"], "token_type": "bearer", "user": result["user"]}
 
 @app.get("/admin/users", tags=["Admin"])
 async def list_users(user=Depends(require_admin)):
