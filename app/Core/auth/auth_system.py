@@ -7,7 +7,6 @@ Hardened and integrated with CGC governance concepts.
 import json
 import hashlib
 import secrets
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, List
 import os
@@ -22,6 +21,8 @@ except ImportError as e:
         "Secure crypto dependencies missing. "
         "Install with: pip install bcrypt pyjwt"
     ) from e
+
+from app.modules.guard.login_guard import record_login_attempt, check_login_lockout, detect_credential_stuffing
 
 
 class AuthError(Exception):
@@ -57,11 +58,6 @@ class AuthSystem:
         # authenticates as the 'service' principal without a user session/JWT.
         # Leave unset to disable service-key auth entirely.
         self.service_api_key = os.getenv("CGC_SERVICE_API_KEY")
-
-        # Rate limiting
-        self.login_attempts: Dict[str, List[float]] = {}  # IP -> [timestamps]
-        self.max_attempts = 5
-        self.lockout_duration = 900  # 15 minutes
 
         # Initialize storage
         os.makedirs(data_dir, exist_ok=True)
@@ -134,25 +130,6 @@ class AuthSystem:
         except ValueError:
             # In case hashed is not a bcrypt hash
             return False
-
-    def _check_rate_limit(self, ip: str) -> bool:
-        """Check if IP is rate limited."""
-        now = time.time()
-        attempts = self.login_attempts.get(ip, [])
-
-        # Clean old attempts
-        attempts = [t for t in attempts if now - t < self.lockout_duration]
-        self.login_attempts[ip] = attempts
-
-        if len(attempts) >= self.max_attempts:
-            return False
-        return True
-
-    def _record_attempt(self, ip: str) -> None:
-        """Record login attempt."""
-        if ip not in self.login_attempts:
-            self.login_attempts[ip] = []
-        self.login_attempts[ip].append(time.time())
 
     def _is_ip_blocked(self, ip: str, blocked: Dict) -> bool:
         """Check if IP is in blocked list."""
@@ -291,28 +268,38 @@ class AuthSystem:
                 "blocked": True,
             }
 
-        if ip and not self._check_rate_limit(ip):
+        # Distributed (Postgres-backed) lockout -- replaces the old
+        # in-memory self.login_attempts dict, which didn't survive a cold
+        # start or share state across Vercel instances. Same 5-attempts/
+        # 15-minute threshold as before, just durable now.
+        if not check_login_lockout(ip):
             return {
                 "success": False,
                 "error": "Too many attempts. Try again later.",
                 "rate_limited": True,
             }
 
-        if ip:
-            self._record_attempt(ip)
+        def _fail(reason: str) -> Dict:
+            record_login_attempt(ip, email, success=False)
+            # Soft-flag only -- logs a warning if the pattern fires, never
+            # blocks anything beyond the lockout check above.
+            detect_credential_stuffing(ip)
+            return {"success": False, "error": reason}
 
         users = self._load_users()
 
         if email not in users:
-            return {"success": False, "error": "Invalid credentials"}
+            return _fail("Invalid credentials")
 
         user = users[email]
 
         if not user.get("active", True):
-            return {"success": False, "error": "Account disabled"}
+            return _fail("Account disabled")
 
         if not self._verify_password(password, user["password_hash"]):
-            return {"success": False, "error": "Invalid credentials"}
+            return _fail("Invalid credentials")
+
+        record_login_attempt(ip, email, success=True)
 
         user["last_login"] = datetime.now(timezone.utc).isoformat()
         user["login_count"] = user.get("login_count", 0) + 1

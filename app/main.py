@@ -51,6 +51,11 @@ from api.v1.endpoints.monitor import router as monitor_router, ALLOWED_APP_SOURC
 # of the CGC Core reinforcement plan).
 from api.v1.endpoints.flow_score import router as flow_score_router
 
+# External guard (Phase 2 of the reinforcement plan) — distributed rate
+# limiting + payload signature checks.
+from app.modules.guard.rate_limiter import check_rate_limit
+from app.modules.guard.payload_guard import scan_payload, record_suspicious_payload
+
 # Type Aliases (Python 3.12+)
 type AuditHash = str
 type SentinelResponse = Dict[str, Any]
@@ -245,7 +250,13 @@ class SignIn(BaseModel):
     password: str
 
 @app.post("/auth/signup", tags=["Auth"])
-async def signup(data: SignUp):
+async def signup(data: SignUp, request: Request):
+    # 5/hour per IP -- generous for real onboarding, a real backstop
+    # against signup spam (there was none before Phase 2).
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(f"signup:{client_ip}", 5, 3600):
+        raise HTTPException(status_code=429, detail="Too many signups — try again later")
+
     # Was create_user(data.email, data.password, data.name, data.role) --
     # create_user's real signature is (email, password, role, created_by),
     # so every signup positionally stuffed `name` into the `role` slot and
@@ -355,6 +366,7 @@ async def root() -> Dict[str, Any]:
 
 @app.post("/governance/decision", tags=["Governance"])
 async def execute_governance_decision(
+    request: Request,
     org_id: str = Form(...),
     action: str = Form(...),
     input_data: str = Form(...),
@@ -372,6 +384,18 @@ async def execute_governance_decision(
     if app_source not in ALLOWED_APP_SOURCES:
         app_source = "unknown"
 
+    # Dual-keyed distributed rate limit: per org_id AND per IP. Either one
+    # tripping blocks the request -- an org-only check alone wouldn't catch
+    # an attacker rotating which org_id it claims from one source, and an
+    # IP-only check alone would be too coarse (real traffic from shared
+    # Vercel/Supabase edge infrastructure can legitimately span many orgs
+    # behind one IP pool), so the IP ceiling is set higher than the org one.
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(f"decision:org:{org_id}", 300, 60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for this organization")
+    if not check_rate_limit(f"decision:ip:{client_ip}", 1000, 60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for this source")
+
     try:
         input_dict = json.loads(input_data)
         domains_list = json.loads(data_domains)
@@ -382,6 +406,20 @@ async def execute_governance_decision(
     # so the eventual proof can't be fabricated after the fact. Sealed once
     # the outcome (ALLOW or blocked) is known, further down.
     decision_id = f"dec_{secrets.token_hex(8)}"
+
+    # Payload signature check -- soft-flag only (logs + records which
+    # pattern/field matched, never the payload content itself). Doesn't
+    # alter the response either way; a cheap first filter, not a
+    # replacement for real input handling elsewhere in the pipeline.
+    try:
+        findings = scan_payload(action, input_dict)
+        for field, patterns in findings.items():
+            for pattern in patterns:
+                logger.warning(f"[guard] suspicious payload: decision={decision_id} org={org_id} field={field} pattern={pattern}")
+                record_suspicious_payload(decision_id, org_id, field, pattern)
+    except Exception as e:
+        logger.warning(f"[guard] payload scan failed (non-fatal): {e}")
+
     intercept_id = None
     if app.pod:
         try:
@@ -510,11 +548,17 @@ async def get_module_metrics(
 @app.post("/audit/seal", tags=["Governance"])
 async def seal_governance_decision(
     payload: Dict[str, Any],
+    request: Request,
     user=Depends(get_current_user)
 ) -> Dict[str, AuditHash]:
     """Seal a governance decision using SCM."""
     timestamp = datetime.now(timezone.utc).isoformat()
-    
+
+    seal_tenant_id = payload.get("org_id", "default")
+    # Lighter-weight endpoint than /governance/decision, lower ceiling.
+    if not check_rate_limit(f"seal:{seal_tenant_id}", 100, 60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for this organization")
+
     if app.scm and hasattr(app.scm, 'sign_data'):
         tenant_id = payload.get("org_id", "default")
         signature_result = app.scm.sign_data(
