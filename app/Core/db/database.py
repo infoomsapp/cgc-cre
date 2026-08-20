@@ -59,6 +59,7 @@ class Database:
         self._create_jla_schema()
         self._create_pod_schema()
         self._create_tco_schema()
+        self._create_guard_schema()
 
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
@@ -724,6 +725,68 @@ class Database:
                 logger.info("cgc_tco audit-chain schema created/verified")
         except Exception as e:
             logger.error(f"cgc_tco schema provisioning failed (non-fatal, TCO logging will error until fixed): {e}")
+
+    def _create_guard_schema(self):
+        """
+        Phase 2 of the reinforcement plan: external guard. Distributed
+        (Postgres-backed) rate limiting to replace the in-memory,
+        single-Vercel-instance limiters that existed before this (both
+        monitor.py's IP-keyed deque and AuthSystem's own login_attempts
+        dict) -- neither survives a cold start or is shared across
+        instances. Three purpose-fit tables:
+          - rate_limit_events: bare (key, created_at) counter for generic
+            per-endpoint limits (signup, governance/decision, audit/seal).
+          - login_attempts: richer (ip, email, success) than a bare counter
+            needs, because credential-stuffing detection has to ask "how
+            many DISTINCT emails failed from this IP," not just "how many
+            attempts."
+          - suspicious_payloads: soft-flag record of a payload pattern
+            match (which pattern/field, never the payload content itself)
+            -- forensic visibility without persisting business data.
+        """
+        if not self.use_postgres:
+            return
+
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_guard")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.rate_limit_events (
+                        id          SERIAL PRIMARY KEY,
+                        key         TEXT NOT NULL,
+                        created_at  TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_guard_rate_key_created ON cgc_guard.rate_limit_events(key, created_at)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.login_attempts (
+                        id          SERIAL PRIMARY KEY,
+                        ip          TEXT,
+                        email       TEXT,
+                        success     BOOLEAN,
+                        created_at  TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_guard_login_ip_created ON cgc_guard.login_attempts(ip, created_at)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.suspicious_payloads (
+                        id               SERIAL PRIMARY KEY,
+                        decision_id      TEXT,
+                        org_id           TEXT,
+                        field            TEXT,
+                        pattern_matched  TEXT,
+                        created_at       TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+
+                conn.commit()
+                logger.info("cgc_guard schema created/verified")
+        except Exception as e:
+            logger.error(f"cgc_guard schema provisioning failed (non-fatal, guard checks will fail open until fixed): {e}")
 
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)
