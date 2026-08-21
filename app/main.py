@@ -361,6 +361,27 @@ async def pod_diag() -> Dict[str, Any]:
             except Exception as e:
                 out["repo_query_ok"] = False
                 out["repo_query_error"] = str(e)
+
+        try:
+            iid = app.pod.begin_intercept(
+                decision_id="diag-decision-001",
+                tenant_id="diag-probe-tenant",
+                model_identifier="diag/self-test/v1",
+                input_payload={"probe": True}
+            )
+            out["begin_intercept_ok"] = True
+            out["intercept_id"] = iid
+            triplet, block = await app.pod.seal_intercept(
+                intercept_id=iid,
+                output_payload={"probe_result": "ok"},
+                governance_outcome="APPROVE"
+            )
+            out["seal_intercept_ok"] = True
+            out["block_number"] = block.block_number
+            out["block_hash"] = block.block_hash
+        except Exception as e:
+            out["seal_intercept_ok"] = False
+            out["seal_intercept_error"] = str(e)
     return out
 
 # =========================
