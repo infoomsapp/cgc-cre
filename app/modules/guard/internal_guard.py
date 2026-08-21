@@ -194,6 +194,33 @@ def detect_cross_tenant_reach(module_source: str, window_days: int = 7) -> Optio
     }
 
 
+def get_recent_internal_flags(limit: int = 50, flag_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Dashboard/visibility read -- most recent persisted findings, newest first."""
+    db = get_database()
+    try:
+        with db.get_connection() as conn:
+            if conn is None:
+                return []
+            cur = conn.cursor()
+            if flag_type:
+                cur.execute(
+                    "SELECT flag_type, tenant_id, module_source, details, created_at "
+                    "FROM cgc_guard.internal_flags WHERE flag_type = %s ORDER BY created_at DESC LIMIT %s",
+                    (flag_type, limit)
+                )
+            else:
+                cur.execute(
+                    "SELECT flag_type, tenant_id, module_source, details, created_at "
+                    "FROM cgc_guard.internal_flags ORDER BY created_at DESC LIMIT %s",
+                    (limit,)
+                )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"[guard] failed to read internal flags (non-fatal): {e}")
+        return []
+
+
 def record_internal_flag(flag_type: str, tenant_id: Optional[str], module_source: Optional[str], details: Dict[str, Any]) -> None:
     import json as _json
     db = get_database()
