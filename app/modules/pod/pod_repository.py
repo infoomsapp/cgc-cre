@@ -153,7 +153,8 @@ class PoDRepository:
     Design principles:
     - Never raises to caller — DB failure logs and returns None/False
     - All writes are idempotent (ON CONFLICT DO NOTHING)
-    - save_intercept_and_block uses a transaction for atomicity
+    - seal_block_atomic uses a per-tenant advisory lock + one transaction
+      for both correct block sequencing and atomicity
     - pod_ledger is append-only (enforced by DB RULE, not just code)
     - RLS ensures tenant data isolation at the DB level
     """
@@ -161,45 +162,6 @@ class PoDRepository:
     # ─────────────────────────────────────────────────────────────────────────
     # CHAIN STATE
     # ─────────────────────────────────────────────────────────────────────────
-
-    async def get_last_block_hash(self, tenant_id: str) -> str:
-        GENESIS = "0" * 64
-        try:
-            async with get_connection(tenant_id) as conn:
-                if conn is None:
-                    return GENESIS
-                row = await conn.fetchrow(
-                    """
-                    SELECT block_hash
-                    FROM   cgc_pod.pod_ledger
-                    WHERE  tenant_id = $1
-                    ORDER  BY block_number DESC
-                    LIMIT  1
-                    """,
-                    _ledger_uid(tenant_id)
-                )
-                return row["block_hash"] if row else GENESIS
-        except Exception as e:
-            logger.error(f"[PoDRepo] get_last_block_hash: {e}")
-            return "0" * 64
-
-    async def get_next_block_number(self, tenant_id: str) -> int:
-        try:
-            async with get_connection(tenant_id) as conn:
-                if conn is None:
-                    return 0
-                row = await conn.fetchrow(
-                    """
-                    SELECT COALESCE(MAX(block_number), -1) + 1 AS next_num
-                    FROM   cgc_pod.pod_ledger
-                    WHERE  tenant_id = $1
-                    """,
-                    _ledger_uid(tenant_id)
-                )
-                return int(row["next_num"]) if row else 0
-        except Exception as e:
-            logger.error(f"[PoDRepo] get_next_block_number: {e}")
-            return 0
 
     async def get_chain_height(self, tenant_id: str) -> int:
         try:
@@ -219,16 +181,35 @@ class PoDRepository:
     # ATOMIC WRITE
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def save_intercept_and_block(
+    async def seal_block_atomic(
         self,
         triplet: "InterceptTriplet",
-        block: "PoDBlock",
-    ) -> bool:
+        governance_outcome: str,
+        compliance_score: Optional[float],
+        block_factory,
+    ) -> Optional["PoDBlock"]:
         """
-        Atomically persist InterceptTriplet + PoDBlock in one transaction.
-        If either write fails, both are rolled back.
-        The pod_ledger insert is effectively immutable — DB RULE prevents
-        any future UPDATE or DELETE on that table.
+        Atomically determines this tenant's next block_number/previous_hash
+        and persists the sealed block -- replaces the old design where
+        PoDInterceptor computed both values from a per-process in-memory
+        counter that resets to zero on every cold start. On Vercel that
+        means "every cold start", not just genuine concurrent requests --
+        without this, every fresh instance independently believes it's
+        sealing block #0 for a tenant that may already have dozens of real
+        blocks, producing multiple unlinked chain forks in the same table.
+
+        A per-tenant Postgres advisory lock (`pg_advisory_xact_lock`,
+        transaction-scoped, auto-released on commit/rollback) serializes
+        concurrent seals for the SAME tenant -- including across different
+        Vercel instances, since the lock lives in Postgres, not in any one
+        process -- while different tenants proceed fully in parallel.
+        `block_factory(next_number, prev_hash) -> PoDBlock` is called while
+        the lock is held, since the block's own hash is a pure function of
+        both values and must be computed before any concurrent writer for
+        this tenant could act on stale numbers.
+
+        The pod_ledger insert is effectively immutable -- DB RULE/trigger
+        prevents any future UPDATE or DELETE on that table.
         """
         def _ts(iso_str: Optional[str]):
             # InterceptTriplet/PoDBlock store timestamps as ISO strings
@@ -239,12 +220,34 @@ class PoDRepository:
             # DB-write boundary.
             return datetime.fromisoformat(iso_str) if iso_str else None
 
+        GENESIS = "0" * 64
         try:
             async with get_connection(triplet.tenant_id) as conn:
                 if conn is None:
-                    return False
+                    return None
 
                 async with conn.transaction():
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext($1))",
+                        triplet.tenant_id
+                    )
+
+                    row = await conn.fetchrow(
+                        """
+                        SELECT COALESCE(MAX(block_number), -1) + 1 AS next_num,
+                               (SELECT block_hash FROM cgc_pod.pod_ledger
+                                 WHERE tenant_id = $1
+                                 ORDER BY block_number DESC LIMIT 1) AS last_hash
+                        FROM   cgc_pod.pod_ledger
+                        WHERE  tenant_id = $1
+                        """,
+                        _ledger_uid(triplet.tenant_id)
+                    )
+                    next_number = int(row["next_num"]) if row and row["next_num"] is not None else 0
+                    prev_hash = row["last_hash"] if row and row["last_hash"] else GENESIS
+
+                    block = block_factory(next_number, prev_hash)
+
                     await conn.execute(
                         """
                         INSERT INTO cgc_pod.inference_intercepts (
@@ -297,32 +300,11 @@ class PoDRepository:
                     f"[PoDRepo] Atomic OK | intercept={triplet.intercept_id[:8]} "
                     f"block=#{block.block_number} hash={block.block_hash[:12]}..."
                 )
-                return True
+                return block
 
         except Exception as e:
-            logger.error(f"[PoDRepo] TRANSACTION FAILED: {e}")
-            return False
-
-    async def persist(
-        self,
-        triplet: "InterceptTriplet",
-        block: "PoDBlock",
-        decision_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Adapter used by PoDInterceptor.seal_intercept() -- that call site
-        expects a `persist(triplet=, block=, decision_id=)` method returning
-        block metadata, which this class never actually defined (it only had
-        save_intercept_and_block, a different name/signature) -- the
-        interceptor's DB persistence call has been silently failing and
-        falling back to in-memory-only every time it ran, since day one.
-        `decision_id` is already on both triplet and block; accepted here
-        only to match the caller's existing call convention.
-        """
-        ok = await self.save_intercept_and_block(triplet, block)
-        if not ok:
+            logger.error(f"[PoDRepo] seal_block_atomic FAILED: {e}")
             return None
-        return {"block_hash": block.block_hash, "block_number": block.block_number}
 
     async def verify_chain(self, tenant_id: str) -> Dict[str, Any]:
         """
@@ -438,18 +420,20 @@ class PoDRepository:
     async def run_integrity_verification(
         self,
         tenant_id: str,
-        verified_by: str = "cgc-pod-verifier"
+        verified_by: str = "cgc-pod-verifier",
+        from_block: int = 0,
+        to_block: int = 999_999_999
     ) -> Dict[str, Any]:
         """
-        Full chain integrity verification.
-        Walks all blocks, verifies previous_hash linkage.
+        Chain integrity verification over [from_block, to_block] (default:
+        the whole chain). Walks the range, verifies previous_hash linkage.
         Persists result to cgc_pod.chain_integrity_log.
         Returns audit report for legal submission.
         """
         start = time.monotonic()
         GENESIS = "0" * 64
 
-        blocks = await self.get_chain_range(tenant_id, 0, 999_999_999)
+        blocks = await self.get_chain_range(tenant_id, from_block, to_block)
         if not blocks:
             return {
                 "tenant_id": tenant_id, "blocks_verified": 0,
@@ -459,7 +443,11 @@ class PoDRepository:
             }
 
         broken_at = None
-        prev_hash = GENESIS
+        # A partial range that doesn't start at the true genesis block can
+        # only verify internal linkage within the range -- the first
+        # block's own previous_block_hash is trusted as the range's
+        # starting point rather than assumed to be GENESIS.
+        prev_hash = GENESIS if blocks[0]["block_number"] == 0 else blocks[0]["previous_block_hash"]
         for block in blocks:
             if block["previous_block_hash"] != prev_hash:
                 broken_at = block["block_number"]

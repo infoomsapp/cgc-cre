@@ -4,6 +4,10 @@ GET /api/v1/verify/{decision_id}
 Forensic endpoint: cryptographic proof of any AI decision.
 Returns the PoD block, triplet hash, RSA signature, and chain status.
 This is the "30-second demo" for auditors and enterprise clients.
+
+Deliberately unauthenticated by design (gated only by knowing the real
+decision_id + tenant_id, not a bearer token) -- "any auditor holding the
+decision_id can verify" is this endpoint's whole point, not an oversight.
 """
 
 from fastapi import APIRouter, HTTPException, Header, Query
@@ -11,15 +15,10 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import datetime, timezone
 
-import asyncpg
-import os
+from app.modules.pod.pod_repository import get_pod_repository
+from app.modules.tco.tcomodule import TCO
 
 router = APIRouter()
-
-
-async def _get_conn():
-    """Get a direct asyncpg connection for forensic queries."""
-    return await asyncpg.connect(os.getenv("CGC_DATABASE_URL"))
 
 
 @router.get(
@@ -44,155 +43,95 @@ async def verify_decision(
     - Exactly when (pre-delivery timestamp)
     - What the outcome was
     - That the record hasn't been altered (chain integrity)
+
+    Merges two independent, already-existing, already-correct sources --
+    PoDRepository.forensic_lookup() (crypto proof + chain position, from
+    cgc_pod.*) and TCO.get_decision_audit() (the governance artifact --
+    action/area/sensitivity/outcome/score -- from cgc_tco.audit_trail).
+    Either can be legitimately missing (e.g. a decision whose PoD seal
+    failed but whose TCO log succeeded, since main.py's seal_intercept
+    call is itself fail-open) -- whatever is real gets returned, nothing
+    is fabricated to fill a gap.
     """
-    conn = None
-    try:
-        conn = await _get_conn()
+    repo = get_pod_repository()
+    pod_record = await repo.forensic_lookup(decision_id, x_tenant_id)
 
-        # Set tenant context for RLS. set_config() is parameterizable (unlike
-        # `SET LOCAL var = 'value'`, which is a DDL-like statement Postgres
-        # doesn't support bind params for) -- SQL injection fix: x_tenant_id
-        # is unauthenticated, attacker-controlled header input, and this used
-        # to be an f-string interpolated straight into raw SQL.
-        await conn.execute("SELECT set_config('cgc.current_tenant_id', $1, true)", x_tenant_id)
+    # TCO.get_decision_audit() looks up by decision_id alone (no tenant
+    # scoping of its own) -- enforce tenant isolation here explicitly so
+    # this public, unauthenticated-by-design endpoint can't be used to
+    # read another tenant's governance record just by guessing a
+    # decision_id and claiming a different x_tenant_id.
+    tco_result = TCO().get_decision_audit(decision_id)
+    tco_entry = None
+    if tco_result.get("found") and tco_result["audit_entry"].get("tenant_id") == x_tenant_id:
+        tco_entry = tco_result["audit_entry"]
 
-        # Main forensic query — joins decisions + pod_chain + prefilter
-        row = await conn.fetchrow(
-            """
-            SELECT
-                d.decision_id,
-                d.tenant_id,
-                d.action,
-                d.area,
-                d.sensitivity_level,
-                d.outcome,
-                d.aggregated_score,
-                d.approval_threshold,
-                d.judge_version,
-                d.decided_at,
-                d.processing_time_ms,
-                d.pod_hash,
-                d.anchored,
-                d.anchor_tx,
-                pc.block_number,
-                pc.previous_pod_hash,
-                pc.triplet_hash,
-                pc.triplet_signature,
-                pc.timestamp_token,
-                pc.merkle_root,
-                p.area_identified,
-                p.sensitive_domains_count,
-                p.compliance_owner_present,
-                p.short_circuit
-            FROM   decisions d
-            LEFT JOIN pod_chain pc ON d.decision_id = pc.decision_id
-            LEFT JOIN prefilter_results p
-                ON d.decision_id = p.decision_id
-                AND d.decided_at  = p.decided_at
-            WHERE  d.decision_id = $1
-              AND  d.tenant_id   = $2
-            LIMIT  1
-            """,
-            decision_id, x_tenant_id
-        )
-
-        if not row:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "decision_not_found",
-                    "decision_id": decision_id,
-                    "message": "No decision found for this tenant"
-                }
-            )
-
-        r = dict(row)
-
-        # Build response
-        response = {
-            "decision_id": r["decision_id"],
-            "verified_at": datetime.now(timezone.utc).isoformat(),
-
-            # Governance result
-            "governance": {
-                "action":             r["action"],
-                "area":               r["area"],
-                "sensitivity_level":  r["sensitivity_level"],
-                "outcome":            r["outcome"],
-                "aggregated_score":   float(r["aggregated_score"]) if r["aggregated_score"] else None,
-                "approval_threshold": float(r["approval_threshold"]) if r["approval_threshold"] else None,
-                "judge_version":      r["judge_version"],
-                "decided_at":         r["decided_at"].isoformat() if r["decided_at"] else None,
-                "processing_time_ms": float(r["processing_time_ms"]) if r["processing_time_ms"] else None,
-            },
-
-            # Cryptographic proof (PoD Patent 1)
-            "proof_of_decision": {
-                "pod_hash":          r["pod_hash"],
-                "triplet_hash":      r["triplet_hash"],
-                "triplet_signature": r["triplet_signature"],
-                "timestamp_token":   r["timestamp_token"],
-                "merkle_root":       r["merkle_root"],
-                "non_repudiation":   r["triplet_signature"] is not None,
-            },
-
-            # Chain position
-            "chain": {
-                "block_number":      r["block_number"],
-                "previous_pod_hash": r["previous_pod_hash"],
-                "anchored":          r["anchored"],
-                "anchor_tx":         r["anchor_tx"],
-            },
-
-            # Context
-            "context": {
-                "area_identified":           r["area_identified"],
-                "sensitive_domains_count":   r["sensitive_domains_count"],
-                "compliance_owner_present":  r["compliance_owner_present"],
-                "short_circuit":             r["short_circuit"],
-            }
-        }
-
-        # Optional: full chain proof (for audit submissions)
-        if include_chain_proof and r["block_number"] is not None:
-            chain_rows = await conn.fetch(
-                """
-                SELECT block_number, pod_hash, previous_pod_hash,
-                       governance_outcome, created_at
-                FROM   pod_chain
-                WHERE  block_number BETWEEN $1 AND $2
-                ORDER  BY block_number ASC
-                """,
-                max(0, r["block_number"] - 5),
-                r["block_number"]
-            )
-            response["chain_proof"] = [
-                {
-                    "block_number":      cr["block_number"],
-                    "pod_hash":          cr["pod_hash"],
-                    "previous_pod_hash": cr["previous_pod_hash"],
-                    "outcome":           cr["governance_outcome"],
-                    "created_at":        cr["created_at"].isoformat()
-                }
-                for cr in chain_rows
-            ]
-
-        return JSONResponse(content=response)
-
-    except HTTPException:
-        raise
-    except Exception as e:
+    if pod_record is None and tco_entry is None:
         raise HTTPException(
-            status_code=500,
+            status_code=404,
             detail={
-                "error": "verification_failed",
-                "message": str(e),
-                "decision_id": decision_id
+                "error": "decision_not_found",
+                "decision_id": decision_id,
+                "message": "No decision found for this tenant"
             }
         )
-    finally:
-        if conn:
-            await conn.close()
+
+    response = {
+        "decision_id": decision_id,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+
+        # Governance result -- real fields only, from cgc_tco.audit_trail.
+        # approval_threshold/judge_version/processing_time_ms were never
+        # persisted anywhere; omitted rather than returned as null in a
+        # way that implies they were ever tracked.
+        "governance": {
+            "action":            tco_entry.get("action") if tco_entry else None,
+            "area":               tco_entry.get("area") if tco_entry else None,
+            "sensitivity_level":  tco_entry.get("sensitivity_level") if tco_entry else None,
+            "outcome":            tco_entry.get("outcome") if tco_entry else (
+                pod_record["governance"]["outcome"] if pod_record else None
+            ),
+            "aggregated_score":   float(tco_entry["aggregated_score"]) if tco_entry and tco_entry.get("aggregated_score") is not None else None,
+            "decided_at":         tco_entry.get("timestamp") if tco_entry else None,
+        } if (tco_entry or pod_record) else None,
+
+        # Cryptographic proof (PoD Patent 1) -- from cgc_pod.*
+        "proof_of_decision": {
+            "triplet_hash":       pod_record["proof"]["triplet_hash"],
+            "triplet_signature":  pod_record["proof"]["triplet_signature"],
+            "model_identifier":   pod_record["proof"]["model_identifier"],
+            "timestamp_token":    pod_record["proof"]["timestamp_token"],
+            "non_repudiation":    pod_record["non_repudiation"],
+        } if pod_record else None,
+
+        # Chain position -- from cgc_pod.pod_ledger
+        "chain": {
+            "block_number":  pod_record["chain"]["block_number"],
+            "previous_hash": pod_record["chain"]["previous_hash"],
+            "block_hash":    pod_record["chain"]["block_hash"],
+            "sealed_at":     pod_record["chain"]["sealed_at"],
+            "tamper_detected": pod_record["chain"]["tamper_detected"],
+        } if pod_record else None,
+    }
+
+    if include_chain_proof and pod_record is not None:
+        block_number = pod_record["chain"]["block_number"]
+        chain_rows = await repo.get_chain_range(
+            x_tenant_id, max(0, block_number - 5), block_number
+        )
+        response["chain_proof"] = [
+            {
+                "block_number":      r["block_number"],
+                "block_hash":        r["block_hash"],
+                "previous_block_hash": r["previous_block_hash"],
+                "outcome":           r["governance_outcome"],
+                "sealed_at":         str(r["sealed_at"]),
+                "tamper_detected":   r["tamper_detected"],
+            }
+            for r in chain_rows
+        ]
+
+    return JSONResponse(content=response)
 
 
 @router.get(
@@ -208,52 +147,14 @@ async def verify_chain_integrity(
     """
     Verifies that no block in the PoD chain has been altered.
     Returns integrity_passed: true/false and the block where the first
-    break was detected, if any.
+    break was detected, if any. Delegates to PoDRepository's own
+    run_integrity_verification(), which already does this correctly
+    against the real cgc_pod.pod_ledger table and already persists the
+    result to cgc_pod.chain_integrity_log.
     """
-    conn = None
     try:
-        conn = await _get_conn()
-
-        rows = await conn.fetch(
-            """
-            SELECT block_number, pod_hash, previous_pod_hash
-            FROM   pod_chain
-            WHERE  block_number BETWEEN $1 AND $2
-            ORDER  BY block_number ASC
-            """,
-            from_block, to_block
+        return await get_pod_repository().run_integrity_verification(
+            tenant_id=x_tenant_id, from_block=from_block, to_block=to_block
         )
-
-        if not rows:
-            return {
-                "tenant_id":       x_tenant_id,
-                "blocks_verified": 0,
-                "integrity_passed": True,
-                "message":         "No blocks in the specified range"
-            }
-
-        GENESIS = "0" * 64
-        broken_at = None
-        prev_hash = GENESIS if rows[0]["block_number"] == 0 else None
-
-        for row in rows:
-            if prev_hash and row["previous_pod_hash"] != prev_hash:
-                broken_at = row["block_number"]
-                break
-            prev_hash = row["pod_hash"]
-
-        return {
-            "tenant_id":       x_tenant_id,
-            "blocks_verified": len(rows),
-            "from_block":      rows[0]["block_number"],
-            "to_block":        rows[-1]["block_number"],
-            "integrity_passed": broken_at is None,
-            "broken_at_block": broken_at,
-            "verified_at":     datetime.now(timezone.utc).isoformat()
-        }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if conn:
-            await conn.close()
