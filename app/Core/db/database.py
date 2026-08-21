@@ -799,6 +799,35 @@ class Database:
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_guard_internal_flags_type ON cgc_guard.internal_flags(flag_type)")
 
+                # Durable tenant usage counters -- replaces TenantManager's
+                # old in-memory self._usage dict (app/Core/tenant/multi_tenant.py),
+                # which reset every cold start instead of every billing period.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.tenant_usage (
+                        id          SERIAL PRIMARY KEY,
+                        org_id      TEXT NOT NULL,
+                        resource    TEXT NOT NULL,
+                        period      TEXT NOT NULL,
+                        count       INTEGER NOT NULL DEFAULT 0,
+                        created_at  TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE (org_id, resource, period)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_guard_tenant_usage_lookup ON cgc_guard.tenant_usage(org_id, resource, period)")
+
+                # Real, writable plan assignment -- previously env-var-only
+                # (CGC_TENANT_{ORG}_PLAN), which has no write path from a
+                # running function. A row here wins over the env var; the
+                # env var stays as the fallback default when no row exists.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.tenant_plans (
+                        org_id      TEXT PRIMARY KEY,
+                        plan        TEXT NOT NULL,
+                        updated_at  TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+
                 conn.commit()
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:
