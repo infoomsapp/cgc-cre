@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CGC Core — Governance</title>
+<style>
+  :root {
+    --bg: #0b0f0e;
+    --panel: #121816;
+    --panel-2: #171f1c;
+    --border: #253430;
+    --text: #e6efe9;
+    --muted: #7d9089;
+    --accent: #4fd8a8;
+    --accent-dim: rgba(79,216,168,0.12);
+    --red: #ea8a78;
+    --red-bg: rgba(234,138,120,0.12);
+    --amber: #e8b454;
+    --amber-bg: rgba(232,180,84,0.12);
+    --green: #4ed892;
+    --green-bg: rgba(78,216,146,0.12);
+    --mono: ui-monospace, "SF Mono", Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+  }
+  #gate {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px; padding: 24px;
+  }
+  #gate .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 28px; width: 100%; max-width: 380px;
+  }
+  #gate h1 { font-size: 16px; margin: 0 0 4px; letter-spacing: 0.02em; }
+  #gate p { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+  #gate input {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--mono);
+    font-size: 12.5px; margin-bottom: 10px;
+  }
+  #gate button, .btn {
+    background: var(--accent); color: #04140e; border: none; border-radius: 6px;
+    padding: 9px 14px; font-weight: 700; font-size: 12.5px; cursor: pointer; width: 100%;
+  }
+  #gate .err { color: var(--red); font-size: 12px; margin-top: 8px; min-height: 16px; }
+  #app { display: none; max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; }
+  header.top {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
+  }
+  header.top h1 { font-size: 15px; margin: 0; letter-spacing: 0.02em; }
+  header.top .sub { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
+  header.top .right { display: flex; align-items: center; gap: 10px; }
+  #dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
+  .logout { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; }
+
+  .topnav { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+  .topnav a {
+    color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 700;
+    padding: 6px 12px; border-radius: 6px; letter-spacing: 0.02em;
+  }
+  .topnav a:hover { color: var(--text); background: var(--panel-2); }
+  .topnav a.active { color: #04140e; background: var(--accent); }
+
+  section { margin-bottom: 24px; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+
+  .modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap: 8px; }
+  .mod { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }
+  .mod .m-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+  .mod .m-dot.off { background: var(--red); }
+  .mod .m-name { font-family: var(--mono); font-size: 11.5px; }
+  .empty { color: var(--muted); font-size: 12.5px; padding: 20px; text-align: center; }
+
+  .field { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  .reportControls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+  .reportControls .fieldGroup { display: flex; flex-direction: column; gap: 4px; }
+  .reportControls label { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .reportControls .btn { width: auto; padding: 9px 18px; }
+  .reportViewerCard { display: none; padding: 0; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .reportViewerBar { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--panel-2); }
+  .reportViewerBar .logout { width: auto; padding: 5px 12px; }
+  #reportViewer { width: 100%; height: 640px; border: none; display: block; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="card">
+    <h1>CGC Core — Governance</h1>
+    <p>Paste your Bearer token to connect. Stored only in this browser.</p>
+    <input id="keyInput" type="password" placeholder="CGC_SERVICE_API_KEY or token" autocomplete="off">
+    <button onclick="connect()">Connect</button>
+    <div class="err" id="gateErr"></div>
+  </div>
+</div>
+
+<div id="app">
+  <header class="top">
+    <div>
+      <h1>CGC Core — Governance</h1>
+      <div class="sub">cgc-cre.vercel.app</div>
+    </div>
+    <div class="right">
+      <span id="dot"></span>
+      <span class="sub" id="lastRefresh">—</span>
+      <button class="logout" onclick="disconnect()">Disconnect</button>
+    </div>
+  </header>
+
+  <nav class="topnav">
+    <a href="/dashboard">Home</a>
+    <a href="/dashboard/governance" class="active">Governance</a>
+    <a href="/dashboard/scoring">Scoring</a>
+    <a href="/dashboard/security">Security</a>
+  </nav>
+
+  <section>
+    <h2>Governance Modules</h2>
+    <div class="modgrid" id="modGrid"></div>
+  </section>
+
+  <section>
+    <h2>Governance Reports</h2>
+    <div class="reportControls">
+      <div class="fieldGroup">
+        <label for="reportAppSource">App</label>
+        <select id="reportAppSource" class="field">
+          <option value="ledgiproof">LedgiProof</option>
+          <option value="ledgiproof-tax-pro">LedgiProof Tax Pro</option>
+        </select>
+      </div>
+      <div class="fieldGroup">
+        <label for="reportFrom">From</label>
+        <input type="date" id="reportFrom" class="field">
+      </div>
+      <div class="fieldGroup">
+        <label for="reportTo">To</label>
+        <input type="date" id="reportTo" class="field">
+      </div>
+      <button class="btn" onclick="generateReport()">Generate Report</button>
+    </div>
+    <div class="reportViewerCard" id="reportViewerCard">
+      <div class="reportViewerBar">
+        <span class="sub">Report preview</span>
+        <button class="logout" onclick="closeReport()">Close</button>
+      </div>
+      <iframe id="reportViewer"></iframe>
+    </div>
+  </section>
+</div>
+
+<script>
+const API = window.location.origin;
+let TOKEN = localStorage.getItem('cgc_dash_token') || '';
+let timer = null;
+
+function connect() {
+  const v = document.getElementById('keyInput').value.trim();
+  if (!v) return;
+  TOKEN = v;
+  localStorage.setItem('cgc_dash_token', v);
+  boot();
+}
+function disconnect() {
+  localStorage.removeItem('cgc_dash_token');
+  TOKEN = '';
+  if (timer) clearInterval(timer);
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('gate').style.display = 'flex';
+}
+
+async function api(path) {
+  const r = await fetch(API + path, { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function refresh() {
+  try {
+    const nodes = await api('/status/nodes');
+    document.getElementById('dot').style.background = 'var(--green)';
+    document.getElementById('gateErr').textContent = '';
+
+    const mods = nodes.nodes || {};
+    document.getElementById('modGrid').innerHTML = Object.keys(mods).map(k => {
+      const active = mods[k] && (mods[k].status === 'active' || mods[k].status === 'ACTIVE' || mods[k].total_evaluations !== undefined);
+      return `<div class="mod"><span class="m-dot ${active ? '' : 'off'}"></span><span class="m-name">${esc(k)}</span></div>`;
+    }).join('') || '<div class="empty">No module data</div>';
+
+    document.getElementById('lastRefresh').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('dot').style.background = 'var(--red)';
+    document.getElementById('lastRefresh').textContent = 'error: ' + e.message;
+  }
+}
+
+function initReportDates() {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - 30);
+  document.getElementById('reportTo').value = to.toISOString().slice(0, 10);
+  document.getElementById('reportFrom').value = from.toISOString().slice(0, 10);
+}
+
+let reportObjectUrl = null;
+
+async function generateReport() {
+  const appSource = document.getElementById('reportAppSource').value;
+  const from = document.getElementById('reportFrom').value;
+  const to = document.getElementById('reportTo').value;
+  try {
+    const r = await fetch(`${API}/governance/reports/${appSource}?from_date=${from}&to_date=${to}`, {
+      headers: { 'Authorization': 'Bearer ' + TOKEN }
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    if (reportObjectUrl) URL.revokeObjectURL(reportObjectUrl);
+    reportObjectUrl = URL.createObjectURL(blob);
+    document.getElementById('reportViewer').src = reportObjectUrl;
+    document.getElementById('reportViewerCard').style.display = 'block';
+  } catch (e) {
+    alert('Report generation failed: ' + e.message);
+  }
+}
+
+function closeReport() {
+  document.getElementById('reportViewerCard').style.display = 'none';
+  document.getElementById('reportViewer').src = 'about:blank';
+  if (reportObjectUrl) { URL.revokeObjectURL(reportObjectUrl); reportObjectUrl = null; }
+}
+
+async function boot() {
+  document.getElementById('gate').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  try {
+    await api('/status/nodes');
+  } catch (e) {
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('gate').style.display = 'flex';
+    document.getElementById('gateErr').textContent = 'Invalid token or connection failed.';
+    return;
+  }
+  initReportDates();
+  refresh();
+  timer = setInterval(refresh, 30000);
+}
+
+if (TOKEN) boot();
+</script>
+</body>
+</html>

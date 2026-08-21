@@ -353,18 +353,39 @@ async def health() -> Dict[str, Any]:
     which is all a deploy healthcheck should require."""
     return {"status": "ok", "version": "2.2.2"}
 
-# Read once at import time -- a static bundled asset, not a runtime write,
-# so this is safe on Vercel's read-only filesystem.
-_DASHBOARD_HTML = (Path(__file__).parent / "static" / "dashboard.html").read_text(encoding="utf-8")
+# Read once at import time -- static bundled assets, not a runtime write,
+# so this is safe on Vercel's read-only filesystem. Split into 4 dedicated
+# pages (hub + governance/scoring/security) so governance, scoring, and
+# security stay visually and operationally separate instead of one mixed
+# dashboard -- each is self-contained (own CSS/JS, no shared-asset routes),
+# all reading/writing the same localStorage token so signing in on one
+# carries over to the others.
+_DASHBOARD_HOME_HTML = (Path(__file__).parent / "static" / "dashboard_home.html").read_text(encoding="utf-8")
+_DASHBOARD_GOVERNANCE_HTML = (Path(__file__).parent / "static" / "dashboard_governance.html").read_text(encoding="utf-8")
+_DASHBOARD_SCORING_HTML = (Path(__file__).parent / "static" / "dashboard_scoring.html").read_text(encoding="utf-8")
+_DASHBOARD_SECURITY_HTML = (Path(__file__).parent / "static" / "dashboard_security.html").read_text(encoding="utf-8")
 
 @app.get("/dashboard", tags=["System"], response_class=HTMLResponse)
 async def dashboard() -> HTMLResponse:
-    """CGC Core Monitoring Systems -- a self-contained static page (no
-    server-side auth on the shell itself). It prompts for a Bearer token
-    client-side and uses it to call the already-authenticated /monitor/*
-    and /status/nodes JSON endpoints directly from the browser. Temporary
-    home for this (v1) -- a dedicated page/app is the planned next step."""
-    return HTMLResponse(content=_DASHBOARD_HTML)
+    """CGC Core Monitoring hub -- self-contained static page (no server-side
+    auth on the shell itself). Prompts for a Bearer token client-side and
+    links out to the 3 dedicated Governance/Scoring/Security screens."""
+    return HTMLResponse(content=_DASHBOARD_HOME_HTML)
+
+@app.get("/dashboard/governance", tags=["System"], response_class=HTMLResponse)
+async def dashboard_governance() -> HTMLResponse:
+    """Governance Modules + Governance Reports (PDF generator/viewer)."""
+    return HTMLResponse(content=_DASHBOARD_GOVERNANCE_HTML)
+
+@app.get("/dashboard/scoring", tags=["System"], response_class=HTMLResponse)
+async def dashboard_scoring() -> HTMLResponse:
+    """Business Flow Scoring cards (Phase 1)."""
+    return HTMLResponse(content=_DASHBOARD_SCORING_HTML)
+
+@app.get("/dashboard/security", tags=["System"], response_class=HTMLResponse)
+async def dashboard_security() -> HTMLResponse:
+    """Guard Activity (Phase 2/3 stat cards + tables) + Recent Errors."""
+    return HTMLResponse(content=_DASHBOARD_SECURITY_HTML)
 
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:
