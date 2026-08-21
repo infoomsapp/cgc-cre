@@ -79,3 +79,23 @@ def record_suspicious_payload(decision_id: Optional[str], org_id: Optional[str],
             conn.commit()
     except Exception as e:
         logger.warning(f"[guard] failed to record suspicious payload (non-fatal): {e}")
+
+
+def get_recent_suspicious_payloads(limit: int = 50) -> List[Dict[str, Any]]:
+    """Dashboard/visibility read -- most recent soft-flagged payloads, newest first."""
+    db = get_database()
+    try:
+        with db.get_connection() as conn:
+            if conn is None:
+                return []
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT decision_id, org_id, field, pattern_matched, created_at "
+                "FROM cgc_guard.suspicious_payloads ORDER BY created_at DESC LIMIT %s",
+                (limit,)
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"[guard] failed to read suspicious payloads (non-fatal): {e}")
+        return []

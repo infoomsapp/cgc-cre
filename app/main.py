@@ -60,6 +60,10 @@ from app.modules.guard.payload_guard import scan_payload, record_suspicious_payl
 # misuse-detection report over the TCO ledger.
 from api.v1.endpoints.internal_guard import router as internal_guard_router
 
+# Guard activity router — dashboard-visibility reads over what Phase 2/3
+# have already been persisting since they shipped.
+from api.v1.endpoints.guard_activity import router as guard_activity_router
+
 # Type Aliases (Python 3.12+)
 type AuditHash = str
 type SentinelResponse = Dict[str, Any]
@@ -152,6 +156,13 @@ app.include_router(
 # Read-only misuse-detection report over the TCO ledger; no write path touched.
 app.include_router(
     internal_guard_router, prefix="/guard/internal", tags=["Internal Guard"],
+    dependencies=[Depends(get_current_user)]
+)
+
+# Mount the guard-activity router → /guard/activity/*
+# Dashboard-visibility reads only; no write path touched.
+app.include_router(
+    guard_activity_router, prefix="/guard/activity", tags=["Guard Activity"],
     dependencies=[Depends(get_current_user)]
 )
 

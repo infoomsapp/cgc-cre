@@ -118,6 +118,8 @@
   .flowSignal { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--muted); }
   .flowSignal .fsVal { font-family: var(--mono); color: var(--text); white-space: nowrap; }
   .flowSignal.info { opacity: 0.7; font-style: italic; }
+  .guardSubhead { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 18px 0 8px; }
+  .guardSubhead:first-of-type { margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -155,6 +157,35 @@
   <section>
     <h2>Business Flow Scoring</h2>
     <div class="flowCards" id="flowCards"></div>
+  </section>
+
+  <section>
+    <h2>Guard Activity</h2>
+    <div class="cards" id="guardStatCards"></div>
+
+    <h3 class="guardSubhead">Flagged IPs (credential-stuffing shape)</h3>
+    <div class="tablewrap">
+      <table id="stuffingTable">
+        <thead><tr><th>IP</th><th>Distinct Emails</th><th>Attempts</th></tr></thead>
+        <tbody id="stuffingBody"></tbody>
+      </table>
+    </div>
+
+    <h3 class="guardSubhead">Recent Suspicious Payloads</h3>
+    <div class="tablewrap">
+      <table id="payloadTable">
+        <thead><tr><th>Decision</th><th>Org</th><th>Field</th><th>Pattern</th><th>When</th></tr></thead>
+        <tbody id="payloadBody"></tbody>
+      </table>
+    </div>
+
+    <h3 class="guardSubhead">Recent Internal-Guard Flags</h3>
+    <div class="tablewrap">
+      <table id="internalFlagTable">
+        <thead><tr><th>Type</th><th>Tenant</th><th>Actor</th><th>Details</th><th>When</th></tr></thead>
+        <tbody id="internalFlagBody"></tbody>
+      </table>
+    </div>
   </section>
 
   <section>
@@ -276,18 +307,56 @@ function renderFlowCard(appLabel, data) {
 
 async function refresh() {
   try {
-    const [stats, errs, nodes, flowLp, flowLtp] = await Promise.all([
+    const [stats, errs, nodes, flowLp, flowLtp, loginStats, payloads, internalFlags] = await Promise.all([
       api('/monitor/errors/stats?days=7'),
       api('/monitor/errors?limit=50'),
       api('/status/nodes'),
       api('/flow-score/ledgiproof'),
       api('/flow-score/ledgiproof-tax-pro'),
+      api('/guard/activity/login-stats?hours=24'),
+      api('/guard/activity/suspicious-payloads?limit=20'),
+      api('/guard/activity/internal-flags?limit=20'),
     ]);
 
     document.getElementById('flowCards').innerHTML =
       renderFlowCard('LedgiProof', flowLp) + renderFlowCard('LedgiProof Tax Pro', flowLtp);
     document.getElementById('dot').style.background = 'var(--green)';
     document.getElementById('gateErr').textContent = '';
+
+    document.getElementById('guardStatCards').innerHTML = `
+      <div class="card"><div class="n">${loginStats.total}</div><div class="l">Login Attempts (24h)</div></div>
+      <div class="card"><div class="n">${loginStats.failed}</div><div class="l">Failed</div></div>
+      <div class="card"><div class="n">${loginStats.flagged_ips.length}</div><div class="l">Flagged IPs</div></div>
+      <div class="card"><div class="n">${payloads.total}</div><div class="l">Suspicious Payloads</div></div>
+      <div class="card"><div class="n">${internalFlags.total}</div><div class="l">Internal Flags</div></div>
+    `;
+
+    const stuffRows = loginStats.flagged_ips || [];
+    document.getElementById('stuffingBody').innerHTML = stuffRows.length ? stuffRows.map(r => `
+      <tr><td>${esc(r.ip)}</td><td>${esc(r.distinct_emails)}</td><td>${esc(r.attempts)}</td></tr>
+    `).join('') : `<tr><td colspan="3" class="empty">No flagged IPs in the last 24h</td></tr>`;
+
+    const payloadRows = payloads.payloads || [];
+    document.getElementById('payloadBody').innerHTML = payloadRows.length ? payloadRows.map(r => `
+      <tr>
+        <td class="msg">${esc(r.decision_id)}</td>
+        <td>${esc(r.org_id)}</td>
+        <td>${esc(r.field)}</td>
+        <td>${esc(r.pattern_matched)}</td>
+        <td>${esc((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+      </tr>
+    `).join('') : `<tr><td colspan="5" class="empty">No suspicious payloads recorded</td></tr>`;
+
+    const flagRows = internalFlags.flags || [];
+    document.getElementById('internalFlagBody').innerHTML = flagRows.length ? flagRows.map(r => `
+      <tr>
+        <td><span class="pill warning">${esc(r.flag_type)}</span></td>
+        <td>${esc(r.tenant_id)}</td>
+        <td>${esc(r.module_source)}</td>
+        <td class="msg">${esc(JSON.stringify(r.details || {}))}</td>
+        <td>${esc((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+      </tr>
+    `).join('') : `<tr><td colspan="5" class="empty">No internal-guard findings recorded</td></tr>`;
 
     document.getElementById('statCards').innerHTML = `
       <div class="card"><div class="n">${stats.total_reports}</div><div class="l">Unique Errors (7d)</div></div>

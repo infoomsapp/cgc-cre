@@ -67,6 +67,53 @@ def check_login_lockout(ip: Optional[str]) -> bool:
         return True
 
 
+def get_login_activity_stats(hours: int = 24) -> Dict[str, Any]:
+    """
+    Dashboard/visibility read -- aggregate login activity over the trailing
+    window: totals, failure rate, and which IPs are currently over the
+    credential-stuffing distinct-email threshold (a live view of the same
+    check detect_credential_stuffing runs per-attempt).
+    """
+    db = get_database()
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    try:
+        with db.get_connection() as conn:
+            if conn is None:
+                return {"total": 0, "failed": 0, "succeeded": 0, "flagged_ips": []}
+            cur = conn.cursor()
+
+            cur.execute(
+                "SELECT COUNT(*) AS total, "
+                "COUNT(*) FILTER (WHERE success = TRUE) AS succeeded, "
+                "COUNT(*) FILTER (WHERE success = FALSE) AS failed "
+                "FROM cgc_guard.login_attempts WHERE created_at >= %s",
+                (since,)
+            )
+            totals = cur.fetchone()
+
+            cur.execute(
+                "SELECT ip, COUNT(DISTINCT email) AS distinct_emails, COUNT(*) AS attempts "
+                "FROM cgc_guard.login_attempts "
+                "WHERE created_at >= %s AND ip IS NOT NULL "
+                "GROUP BY ip HAVING COUNT(DISTINCT email) >= %s "
+                "ORDER BY distinct_emails DESC LIMIT 20",
+                (since, STUFFING_DISTINCT_EMAIL_THRESHOLD)
+            )
+            flagged = [dict(r) for r in cur.fetchall()]
+
+            return {
+                "total": totals["total"] if totals else 0,
+                "succeeded": totals["succeeded"] if totals else 0,
+                "failed": totals["failed"] if totals else 0,
+                "flagged_ips": flagged,
+                "window_hours": hours,
+            }
+    except Exception as e:
+        logger.warning(f"[guard] failed to read login activity stats (non-fatal): {e}")
+        return {"total": 0, "failed": 0, "succeeded": 0, "flagged_ips": []}
+
+
 def detect_credential_stuffing(ip: Optional[str]) -> Optional[Dict[str, Any]]:
     """
     Soft-flag signal: many DISTINCT emails attempted from one IP in a short
