@@ -412,8 +412,11 @@ async def execute_governance_decision(
     # IP-only check alone would be too coarse (real traffic from shared
     # Vercel/Supabase edge infrastructure can legitimately span many orgs
     # behind one IP pool), so the IP ceiling is set higher than the org one.
+    # The org ceiling now comes from the tenant's real plan (was a flat
+    # 300/min hardcoded constant for every tenant before this).
     client_ip = request.client.host if request.client else "unknown"
-    if not check_rate_limit(f"decision:org:{org_id}", 300, 60):
+    org_rate_limit = tenant_manager.get_rate_limit(org_id, "decisions_per_min", 300)
+    if not check_rate_limit(f"decision:org:{org_id}", org_rate_limit, 60):
         raise HTTPException(status_code=429, detail="Rate limit exceeded for this organization")
     if not check_rate_limit(f"decision:ip:{client_ip}", 1000, 60):
         raise HTTPException(status_code=429, detail="Rate limit exceeded for this source")
