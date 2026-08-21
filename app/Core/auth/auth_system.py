@@ -24,6 +24,7 @@ except ImportError as e:
 
 from app.Core.db.database import get_database
 from app.modules.guard.login_guard import record_login_attempt, check_login_lockout, detect_credential_stuffing
+from app.modules.guard.enforcement import is_hard_mode
 
 logger = logging.getLogger("cgc.auth")
 
@@ -427,9 +428,16 @@ class AuthSystem:
 
         def _fail(reason: str) -> Dict:
             record_login_attempt(ip, email, success=False)
-            # Soft-flag only -- logs a warning if the pattern fires, never
-            # blocks anything beyond the lockout check above.
-            detect_credential_stuffing(ip)
+            # Soft-flag by default -- logs a warning if the pattern fires,
+            # never blocks anything beyond the lockout check above.
+            # GUARD_HARD_MODE_STUFFING=true promotes this to an actual
+            # auto-block of the IP -- off by default until real
+            # false-positive rate has actually been observed; see
+            # app/modules/guard/enforcement.py.
+            flag = detect_credential_stuffing(ip)
+            if flag and ip and is_hard_mode("stuffing"):
+                self.block_user(ip=ip, reason="credential_stuffing_auto_block")
+                logger.warning(f"[auth] BLOCKED (hard mode) IP {ip} for credential-stuffing shape: {flag}")
             return {"success": False, "error": reason}
 
         user = self._get_user(email)

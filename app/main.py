@@ -55,6 +55,7 @@ from api.v1.endpoints.flow_score import router as flow_score_router
 # limiting + payload signature checks.
 from app.modules.guard.rate_limiter import check_rate_limit
 from app.modules.guard.payload_guard import scan_payload, record_suspicious_payload
+from app.modules.guard.enforcement import is_hard_mode as is_guard_hard_mode
 
 # Internal guard router (Phase 3 of the reinforcement plan) — read-only
 # misuse-detection report over the TCO ledger.
@@ -432,16 +433,24 @@ async def execute_governance_decision(
     # the outcome (ALLOW or blocked) is known, further down.
     decision_id = f"dec_{secrets.token_hex(8)}"
 
-    # Payload signature check -- soft-flag only (logs + records which
-    # pattern/field matched, never the payload content itself). Doesn't
-    # alter the response either way; a cheap first filter, not a
-    # replacement for real input handling elsewhere in the pipeline.
+    # Payload signature check -- soft-flag by default (logs + records which
+    # pattern/field matched, never the payload content itself; doesn't
+    # alter the response). GUARD_HARD_MODE_PAYLOAD=true promotes this to an
+    # actual 400 rejection -- off by default until real false-positive rate
+    # has actually been observed; see app/modules/guard/enforcement.py.
     try:
         findings = scan_payload(action, input_dict)
+        if findings and is_guard_hard_mode("payload"):
+            first_field, first_patterns = next(iter(findings.items()))
+            logger.warning(f"[guard] BLOCKED (hard mode) suspicious payload: decision={decision_id} org={org_id} field={first_field} pattern={first_patterns[0]}")
+            record_suspicious_payload(decision_id, org_id, first_field, first_patterns[0])
+            raise HTTPException(status_code=400, detail="Request payload rejected by guard policy")
         for field, patterns in findings.items():
             for pattern in patterns:
                 logger.warning(f"[guard] suspicious payload: decision={decision_id} org={org_id} field={field} pattern={pattern}")
                 record_suspicious_payload(decision_id, org_id, field, pattern)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"[guard] payload scan failed (non-fatal): {e}")
 
