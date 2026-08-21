@@ -1,6 +1,7 @@
 """
 Guard - CGC Core reinforcement plan: external guard (Phase 2), internal
-guard (Phase 3), and their dashboard-visibility read functions.
+guard (Phase 3), their dashboard-visibility read functions, and the
+soft-flag -> hard-block enforcement-mode switch.
 CGC CORE Module
 """
 
@@ -14,6 +15,7 @@ from .internal_guard import (
     record_internal_flag,
     get_recent_internal_flags,
 )
+from .enforcement import is_hard_mode
 
 __all__ = [
     "check_rate_limit",
@@ -29,4 +31,5 @@ __all__ = [
     "detect_cross_tenant_reach",
     "record_internal_flag",
     "get_recent_internal_flags",
+    "is_hard_mode",
 ]
