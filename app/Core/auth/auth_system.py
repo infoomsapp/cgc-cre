@@ -1,11 +1,11 @@
-﻿"""
+"""
 Authentication & Security System
 Olympus Mont Systems LLC - CGC CORE
 Hardened and integrated with CGC governance concepts.
 """
 
 import json
-import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, List
@@ -22,7 +22,10 @@ except ImportError as e:
         "Install with: pip install bcrypt pyjwt"
     ) from e
 
+from app.Core.db.database import get_database
 from app.modules.guard.login_guard import record_login_attempt, check_login_lockout, detect_credential_stuffing
+
+logger = logging.getLogger("cgc.auth")
 
 
 class AuthError(Exception):
@@ -30,7 +33,16 @@ class AuthError(Exception):
 
 
 class AuthSystem:
-    """Enterprise-grade authentication system for CGC CORE."""
+    """
+    Enterprise-grade authentication system for CGC CORE.
+
+    Dual-mode storage, decided once at construction (self._db.use_postgres),
+    same flag Database itself uses: real Postgres (cgc_auth schema) when
+    DATABASE_URL is configured, JSON files under data_dir as the fallback
+    for local dev without a database. Every dict this class returns has the
+    same shape either way -- timestamps are always ISO8601 strings, never a
+    raw datetime, so callers never need to know which backend served them.
+    """
 
     def __init__(
         self,
@@ -42,6 +54,8 @@ class AuthSystem:
         self.users_file = os.path.join(data_dir, "users.json")
         self.sessions_file = os.path.join(data_dir, "sessions.json")
         self.blocked_file = os.path.join(data_dir, "blocked.json")
+
+        self._db = get_database()
 
         # JWT secret MUST be provided in production
         env_secret = os.getenv("JWT_SECRET")
@@ -59,65 +73,251 @@ class AuthSystem:
         # Leave unset to disable service-key auth entirely.
         self.service_api_key = os.getenv("CGC_SERVICE_API_KEY")
 
-        # Initialize storage
+        # JSON fallback storage -- only actually touched when self._db.use_postgres is False.
         os.makedirs(data_dir, exist_ok=True)
         self._init_storage()
 
     # ======================================================================
-    # INTERNAL HELPERS
+    # JSON FALLBACK STORAGE (local dev without DATABASE_URL)
     # ======================================================================
 
-    def _generate_secret(self) -> str:
-        """Generate secure JWT secret."""
-        return secrets.token_urlsafe(32)
-
     def _init_storage(self) -> None:
-        """Initialize storage files."""
         if not os.path.exists(self.users_file):
-            self._save_users({})
+            self._save_users_json({})
         if not os.path.exists(self.sessions_file):
-            self._save_sessions({})
+            self._save_sessions_json({})
         if not os.path.exists(self.blocked_file):
-            self._save_blocked({"ips": [], "emails": []})
+            self._save_blocked_json({"ips": [], "emails": []})
 
-    def _load_users(self) -> Dict:
-        """Load users from file."""
+    def _load_users_json(self) -> Dict:
         try:
             with open(self.users_file, "r") as f:
                 return json.load(f)
         except Exception:
             return {}
 
-    def _save_users(self, users: Dict) -> None:
-        """Save users to file."""
+    def _save_users_json(self, users: Dict) -> None:
         with open(self.users_file, "w") as f:
             json.dump(users, f, indent=2)
 
-    def _load_sessions(self) -> Dict:
-        """Load sessions from file."""
+    def _load_sessions_json(self) -> Dict:
         try:
             with open(self.sessions_file, "r") as f:
                 return json.load(f)
         except Exception:
             return {}
 
-    def _save_sessions(self, sessions: Dict) -> None:
-        """Save sessions to file."""
+    def _save_sessions_json(self, sessions: Dict) -> None:
         with open(self.sessions_file, "w") as f:
             json.dump(sessions, f, indent=2)
 
-    def _load_blocked(self) -> Dict:
-        """Load blocked IPs/users."""
+    def _load_blocked_json(self) -> Dict:
         try:
             with open(self.blocked_file, "r") as f:
                 return json.load(f)
         except Exception:
             return {"ips": [], "emails": []}
 
-    def _save_blocked(self, blocked: Dict) -> None:
-        """Save blocked list."""
+    def _save_blocked_json(self, blocked: Dict) -> None:
         with open(self.blocked_file, "w") as f:
             json.dump(blocked, f, indent=2)
+
+    def _json_is_ip_blocked(self, ip: str, blocked: Dict) -> bool:
+        return any(entry.get("ip") == ip for entry in blocked.get("ips", []))
+
+    def _json_is_email_blocked(self, email: str, blocked: Dict) -> bool:
+        return any(entry.get("email") == email for entry in blocked.get("emails", []))
+
+    # ======================================================================
+    # STORAGE PRIMITIVES -- dispatched on self._db.use_postgres
+    # ======================================================================
+
+    def _get_user(self, email: str) -> Optional[Dict]:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return None
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM cgc_auth.users WHERE email = %s", (email,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        return self._load_users_json().get(email)
+
+    def _insert_user(self, email: str, password_hash: str, role: str, created_by: str, created_at: str) -> bool:
+        """Returns True if inserted, False if the email already existed (atomic either way)."""
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return False
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO cgc_auth.users (email, password_hash, role, created_at, created_by) "
+                    "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (email) DO NOTHING RETURNING email",
+                    (email, password_hash, role, created_at, created_by)
+                )
+                inserted = cur.fetchone() is not None
+                conn.commit()
+                return inserted
+
+        users = self._load_users_json()
+        if email in users:
+            return False
+        users[email] = {
+            "email": email, "password_hash": password_hash, "role": role,
+            "created_at": created_at, "created_by": created_by, "active": True,
+            "last_login": None, "login_count": 0,
+        }
+        self._save_users_json(users)
+        return True
+
+    def _update_user(self, email: str, **fields) -> None:
+        if not fields:
+            return
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return
+                cur = conn.cursor()
+                set_clause = ", ".join(f"{k} = %s" for k in fields)
+                cur.execute(
+                    f"UPDATE cgc_auth.users SET {set_clause} WHERE email = %s",
+                    (*fields.values(), email)
+                )
+                conn.commit()
+            return
+
+        users = self._load_users_json()
+        if email in users:
+            users[email].update(fields)
+            self._save_users_json(users)
+
+    def _list_users(self) -> List[Dict]:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return []
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM cgc_auth.users ORDER BY created_at ASC")
+                return [dict(r) for r in cur.fetchall()]
+        return list(self._load_users_json().values())
+
+    def _get_session(self, token: str) -> Optional[Dict]:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return None
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM cgc_auth.sessions WHERE token = %s", (token,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        return self._load_sessions_json().get(token)
+
+    def _insert_session(self, token: str, email: str, role: str, expires_at: str, ip: Optional[str]) -> None:
+        created_at = datetime.now(timezone.utc).isoformat()
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO cgc_auth.sessions (token, email, role, created_at, expires_at, ip) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (token, email, role, created_at, expires_at, ip)
+                )
+                conn.commit()
+            return
+
+        sessions = self._load_sessions_json()
+        sessions[token] = {"email": email, "role": role, "created_at": created_at, "expires_at": expires_at, "ip": ip}
+        self._save_sessions_json(sessions)
+
+    def _delete_session(self, token: str) -> None:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return
+                cur = conn.cursor()
+                cur.execute("DELETE FROM cgc_auth.sessions WHERE token = %s", (token,))
+                conn.commit()
+            return
+
+        sessions = self._load_sessions_json()
+        if token in sessions:
+            del sessions[token]
+            self._save_sessions_json(sessions)
+
+    def _count_sessions(self) -> int:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return 0
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) AS c FROM cgc_auth.sessions")
+                row = cur.fetchone()
+                return row["c"] if row else 0
+        return len(self._load_sessions_json())
+
+    def _is_ip_blocked(self, ip: str) -> bool:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return False
+                cur = conn.cursor()
+                cur.execute("SELECT 1 FROM cgc_auth.blocklist WHERE ip = %s LIMIT 1", (ip,))
+                return cur.fetchone() is not None
+        return self._json_is_ip_blocked(ip, self._load_blocked_json())
+
+    def _is_email_blocked(self, email: str) -> bool:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return False
+                cur = conn.cursor()
+                cur.execute("SELECT 1 FROM cgc_auth.blocklist WHERE email = %s LIMIT 1", (email,))
+                return cur.fetchone() is not None
+        return self._json_is_email_blocked(email, self._load_blocked_json())
+
+    def _insert_block(self, ip: Optional[str], email: Optional[str], reason: str) -> None:
+        blocked_at = datetime.now(timezone.utc).isoformat()
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO cgc_auth.blocklist (ip, email, reason, blocked_at) VALUES (%s, %s, %s, %s)",
+                    (ip, email, reason, blocked_at)
+                )
+                conn.commit()
+            return
+
+        blocked = self._load_blocked_json()
+        blocked.setdefault("ips", [])
+        blocked.setdefault("emails", [])
+        if ip:
+            blocked["ips"].append({"ip": ip, "reason": reason, "blocked_at": blocked_at})
+        if email:
+            blocked["emails"].append({"email": email, "reason": reason, "blocked_at": blocked_at})
+        self._save_blocked_json(blocked)
+
+    def _count_blocked(self) -> Dict[str, int]:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return {"ips": 0, "emails": 0}
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(*) FILTER (WHERE ip IS NOT NULL) AS ips, "
+                    "COUNT(*) FILTER (WHERE email IS NOT NULL) AS emails FROM cgc_auth.blocklist"
+                )
+                row = cur.fetchone()
+                return {"ips": row["ips"], "emails": row["emails"]} if row else {"ips": 0, "emails": 0}
+        blocked = self._load_blocked_json()
+        return {"ips": len(blocked.get("ips", [])), "emails": len(blocked.get("emails", []))}
+
+    # ======================================================================
+    # PASSWORD HASHING
+    # ======================================================================
 
     def _hash_password(self, password: str) -> str:
         """Hash password with bcrypt."""
@@ -131,62 +331,22 @@ class AuthSystem:
             # In case hashed is not a bcrypt hash
             return False
 
-    def _is_ip_blocked(self, ip: str, blocked: Dict) -> bool:
-        """Check if IP is in blocked list."""
-        for entry in blocked.get("ips", []):
-            if entry.get("ip") == ip:
-                return True
-        return False
-
-    def _is_email_blocked(self, email: str, blocked: Dict) -> bool:
-        """Check if email is in blocked list."""
-        for entry in blocked.get("emails", []):
-            if entry.get("email") == email:
-                return True
-        return False
-
     # ======================================================================
     # BLOCK / RATE LIMIT
     # ======================================================================
 
     def is_blocked(self, ip: str = None, email: str = None) -> bool:
         """Check if IP or email is blocked."""
-        blocked = self._load_blocked()
-
-        if ip and self._is_ip_blocked(ip, blocked):
+        if ip and self._is_ip_blocked(ip):
             return True
-        if email and self._is_email_blocked(email, blocked):
+        if email and self._is_email_blocked(email):
             return True
         return False
 
     def block_user(self, ip: str = None, email: str = None, reason: str = "") -> None:
         """Block IP or email."""
-        blocked = self._load_blocked()
-        blocked.setdefault("ips", [])
-        blocked.setdefault("emails", [])
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        if ip:
-            blocked["ips"].append(
-                {
-                    "ip": ip,
-                    "reason": reason,
-                    "blocked_at": now_iso,
-                }
-            )
-
-        if email:
-            blocked["emails"].append(
-                {
-                    "email": email,
-                    "reason": reason,
-                    "blocked_at": now_iso,
-                }
-            )
-
-        self._save_blocked(blocked)
-        print(f" Blocked: {ip or email} - {reason}")
+        self._insert_block(ip, email, reason)
+        logger.info(f"[auth] blocked: {ip or email} - {reason}")
 
     # ======================================================================
     # USER MANAGEMENT
@@ -204,36 +364,24 @@ class AuthSystem:
 
         Roles: admin, governance_admin, auditor, user, viewer
         """
-        users = self._load_users()
-
-        if email in users:
-            return {"success": False, "error": "User already exists"}
-
         if len(password) < 12:
             return {"success": False, "error": "Password must be 12+ characters"}
 
-        user = {
-            "email": email,
-            "password_hash": self._hash_password(password),
-            "role": role,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "created_by": created_by,
-            "active": True,
-            "last_login": None,
-            "login_count": 0,
-        }
+        password_hash = self._hash_password(password)
+        created_at = datetime.now(timezone.utc).isoformat()
 
-        users[email] = user
-        self._save_users(users)
+        inserted = self._insert_user(email, password_hash, role, created_by, created_at)
+        if not inserted:
+            return {"success": False, "error": "User already exists"}
 
-        print(f" User created: {email} ({role})")
+        logger.info(f"[auth] user created: {email} ({role})")
 
         return {
             "success": True,
             "user": {
                 "email": email,
                 "role": role,
-                "created_at": user["created_at"],
+                "created_at": created_at,
             },
         }
 
@@ -268,10 +416,8 @@ class AuthSystem:
                 "blocked": True,
             }
 
-        # Distributed (Postgres-backed) lockout -- replaces the old
-        # in-memory self.login_attempts dict, which didn't survive a cold
-        # start or share state across Vercel instances. Same 5-attempts/
-        # 15-minute threshold as before, just durable now.
+        # Distributed (Postgres-backed) lockout -- unrelated to this pass,
+        # untouched: already durable since Phase 2.
         if not check_login_lockout(ip):
             return {
                 "success": False,
@@ -286,12 +432,10 @@ class AuthSystem:
             detect_credential_stuffing(ip)
             return {"success": False, "error": reason}
 
-        users = self._load_users()
+        user = self._get_user(email)
 
-        if email not in users:
+        if user is None:
             return _fail("Invalid credentials")
-
-        user = users[email]
 
         if not user.get("active", True):
             return _fail("Account disabled")
@@ -301,26 +445,14 @@ class AuthSystem:
 
         record_login_attempt(ip, email, success=True)
 
-        user["last_login"] = datetime.now(timezone.utc).isoformat()
-        user["login_count"] = user.get("login_count", 0) + 1
-        users[email] = user
-        self._save_users(users)
+        new_login_count = (user.get("login_count") or 0) + 1
+        self._update_user(email, last_login=datetime.now(timezone.utc).isoformat(), login_count=new_login_count)
 
         token = self._create_token(email, user["role"])
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        self._insert_session(token, email, user["role"], expires_at, ip)
 
-        sessions = self._load_sessions()
-        sessions[token] = {
-            "email": email,
-            "role": user["role"],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
-            "ip": ip,
-        }
-        self._save_sessions(sessions)
-
-        # Here you can send an event to TCO (audit) that an admin/user logged in.
-
-        print(f" Login successful: {email}")
+        logger.info(f"[auth] login successful: {email}")
 
         return {
             "success": True,
@@ -338,30 +470,25 @@ class AuthSystem:
         if self.service_api_key and secrets.compare_digest(str(token), self.service_api_key):
             return {"email": "service@ledgiproof", "role": "service"}
 
-        sessions = self._load_sessions()
-
-        if token not in sessions:
+        session = self._get_session(token)
+        if session is None:
             return None
 
-        session = sessions[token]
-
         try:
-            payload = jwt.decode(
+            jwt.decode(
                 token,
                 self.jwt_secret,
                 algorithms=self.jwt_algorithms,
             )
         except jwt.ExpiredSignatureError:
-            del sessions[token]
-            self._save_sessions(sessions)
+            self._delete_session(token)
             return None
         except jwt.InvalidTokenError:
             return None
 
         expires_at = datetime.fromisoformat(session["expires_at"])
         if datetime.now(timezone.utc) > expires_at:
-            del sessions[token]
-            self._save_sessions(sessions)
+            self._delete_session(token)
             return None
 
         return {
@@ -371,11 +498,8 @@ class AuthSystem:
 
     def logout(self, token: str) -> None:
         """Logout user (invalidate session)."""
-        sessions = self._load_sessions()
-        if token in sessions:
-            del sessions[token]
-            self._save_sessions(sessions)
-            print(" Logout successful")
+        self._delete_session(token)
+        logger.info("[auth] logout successful")
 
     # ======================================================================
     # PASSWORD RESET
@@ -383,21 +507,17 @@ class AuthSystem:
 
     def reset_password(self, email: str) -> Dict:
         """Generate password reset token."""
-        users = self._load_users()
+        user = self._get_user(email)
 
-        if email not in users:
+        if user is None:
             return {"success": True, "message": "If email exists, reset link sent"}
 
         reset_token = secrets.token_urlsafe(32)
+        reset_expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
 
-        users[email]["reset_token"] = reset_token
-        users[email]["reset_expires"] = (
-            datetime.now(timezone.utc) + timedelta(hours=1)
-        ).isoformat()
+        self._update_user(email, reset_token=reset_token, reset_expires=reset_expires)
 
-        self._save_users(users)
-
-        print(f" Reset token for {email}: {reset_token}")
+        logger.info(f"[auth] reset token generated for {email}")
 
         return {
             "success": True,
@@ -412,12 +532,10 @@ class AuthSystem:
         reset_token: str = None,
     ) -> Dict:
         """Change user password."""
-        users = self._load_users()
+        user = self._get_user(email)
 
-        if email not in users:
+        if user is None:
             return {"success": False, "error": "User not found"}
-
-        user = users[email]
 
         if reset_token:
             if user.get("reset_token") != reset_token:
@@ -430,14 +548,14 @@ class AuthSystem:
         if len(new_password) < 12:
             return {"success": False, "error": "Password must be 12+ characters"}
 
-        user["password_hash"] = self._hash_password(new_password)
-        user["reset_token"] = None
-        user["reset_expires"] = None
+        self._update_user(
+            email,
+            password_hash=self._hash_password(new_password),
+            reset_token=None,
+            reset_expires=None,
+        )
 
-        users[email] = user
-        self._save_users(users)
-
-        print(f" Password changed: {email}")
+        logger.info(f"[auth] password changed: {email}")
 
         return {"success": True, "message": "Password updated"}
 
@@ -498,23 +616,29 @@ class AuthSystem:
     # ADMIN UTILITIES
     # ======================================================================
 
-    def list_users(self, requester_token: str) -> Dict:
-        """List users (admin/governance_admin only)."""
-        self.authorize(requester_token, "VIEW_CORE_METRICS")
-
-        users = self._load_users()
-        user_list = []
-        for email, user in users.items():
-            user_list.append(
-                {
-                    "email": email,
-                    "role": user["role"],
-                    "active": user.get("active", True),
-                    "created_at": user["created_at"],
-                    "last_login": user.get("last_login"),
-                    "login_count": user.get("login_count", 0),
-                }
-            )
+    def list_users(self) -> Dict:
+        """
+        List users. Was list_users(requester_token) with an internal
+        self.authorize(...) re-check -- but the only real caller,
+        main.py's GET /admin/users, already gates on Depends(require_admin)
+        before this ever runs, so the internal re-check was always
+        redundant with the endpoint's own dependency, and the mismatched
+        signature (main.py calls this with zero args) meant every real
+        call raised TypeError. Authorization is the endpoint's job now,
+        consistently with every other route in this file.
+        """
+        users = self._list_users()
+        user_list = [
+            {
+                "email": u["email"],
+                "role": u["role"],
+                "active": u.get("active", True),
+                "created_at": u["created_at"],
+                "last_login": u.get("last_login"),
+                "login_count": u.get("login_count", 0),
+            }
+            for u in users
+        ]
 
         return {
             "success": True,
@@ -524,23 +648,19 @@ class AuthSystem:
 
     def get_stats(self) -> Dict:
         """Get system stats."""
-        users = self._load_users()
-        sessions = self._load_sessions()
-        blocked = self._load_blocked()
+        users = self._list_users()
+        blocked = self._count_blocked()
 
         return {
             "total_users": len(users),
-            "active_sessions": len(sessions),
-            "blocked_ips": len(blocked.get("ips", [])),
-            "blocked_emails": len(blocked.get("emails", [])),
+            "active_sessions": self._count_sessions(),
+            "blocked_ips": blocked["ips"],
+            "blocked_emails": blocked["emails"],
             "roles": {
-                "admin": len([u for u in users.values() if u["role"] == "admin"]),
-                "governance_admin": len(
-                    [u for u in users.values() if u["role"] == "governance_admin"]
-                ),
-                "auditor": len([u for u in users.values() if u["role"] == "auditor"]),
-                "user": len([u for u in users.values() if u["role"] == "user"]),
-                "viewer": len([u for u in users.values() if u["role"] == "viewer"]),
+                "admin": len([u for u in users if u["role"] == "admin"]),
+                "governance_admin": len([u for u in users if u["role"] == "governance_admin"]),
+                "auditor": len([u for u in users if u["role"] == "auditor"]),
+                "user": len([u for u in users if u["role"] == "user"]),
+                "viewer": len([u for u in users if u["role"] == "viewer"]),
             },
         }
-

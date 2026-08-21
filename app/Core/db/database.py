@@ -60,6 +60,7 @@ class Database:
         self._create_pod_schema()
         self._create_tco_schema()
         self._create_guard_schema()
+        self._create_auth_schema()
 
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
@@ -832,6 +833,78 @@ class Database:
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:
             logger.error(f"cgc_guard schema provisioning failed (non-fatal, guard checks will fail open until fixed): {e}")
+
+    def _create_auth_schema(self):
+        """
+        AuthSystem (app/Core/auth/auth_system.py) stored users/sessions/
+        blocklist in 3 JSON files under CGC_AUTH_DATA_DIR -- /tmp on Vercel,
+        wiped every cold start. Same root cause as TCO's own SQLite->Postgres
+        migration earlier this session, same fix shape.
+
+        Timestamps are stored as TEXT (ISO8601), not TIMESTAMPTZ -- mirrors
+        cgc_tco.audit_trail's own convention, deliberately, so every dict
+        AuthSystem returns has the exact same shape whether it came from
+        Postgres or the JSON fallback (no datetime-vs-string conversion
+        code needed anywhere in AuthSystem).
+
+        Note: an older, unrelated `users`/`get_user`/`save_user` scaffold
+        already exists further down in this file (IDENTITY & ACCESS section)
+        -- confirmed via repo-wide grep that nothing calls it; it predates
+        AuthSystem's real (richer) user model and was never wired to it.
+        Left alone, not reused here -- its schema doesn't match what
+        AuthSystem actually needs (no active/login_count/reset_token).
+        """
+        if not self.use_postgres:
+            return
+
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_auth")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_auth.users (
+                        email          TEXT PRIMARY KEY,
+                        password_hash  TEXT NOT NULL,
+                        role           TEXT NOT NULL DEFAULT 'user',
+                        created_at     TEXT NOT NULL,
+                        created_by     TEXT,
+                        active         BOOLEAN DEFAULT TRUE,
+                        last_login     TEXT,
+                        login_count    INTEGER DEFAULT 0,
+                        reset_token    TEXT,
+                        reset_expires  TEXT
+                    )
+                """)
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_auth.sessions (
+                        token       TEXT PRIMARY KEY,
+                        email       TEXT NOT NULL,
+                        role        TEXT NOT NULL,
+                        created_at  TEXT NOT NULL,
+                        expires_at  TEXT NOT NULL,
+                        ip          TEXT
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_email ON cgc_auth.sessions(email)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_auth.blocklist (
+                        id          SERIAL PRIMARY KEY,
+                        ip          TEXT,
+                        email       TEXT,
+                        reason      TEXT,
+                        blocked_at  TEXT NOT NULL
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_blocklist_ip ON cgc_auth.blocklist(ip)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_blocklist_email ON cgc_auth.blocklist(email)")
+
+                conn.commit()
+                logger.info("cgc_auth schema created/verified")
+        except Exception as e:
+            logger.error(f"cgc_auth schema provisioning failed (non-fatal, AuthSystem will fall back to JSON files until fixed): {e}")
 
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)
