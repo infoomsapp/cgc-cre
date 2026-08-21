@@ -56,6 +56,10 @@ from api.v1.endpoints.flow_score import router as flow_score_router
 from app.modules.guard.rate_limiter import check_rate_limit
 from app.modules.guard.payload_guard import scan_payload, record_suspicious_payload
 
+# Internal guard router (Phase 3 of the reinforcement plan) — read-only
+# misuse-detection report over the TCO ledger.
+from api.v1.endpoints.internal_guard import router as internal_guard_router
+
 # Type Aliases (Python 3.12+)
 type AuditHash = str
 type SentinelResponse = Dict[str, Any]
@@ -141,6 +145,13 @@ app.include_router(
 # Read-only over the already-sealed TCO ledger; no write path touched.
 app.include_router(
     flow_score_router, prefix="/flow-score", tags=["Flow Scoring"],
+    dependencies=[Depends(get_current_user)]
+)
+
+# Mount the internal-guard router → /guard/internal/report
+# Read-only misuse-detection report over the TCO ledger; no write path touched.
+app.include_router(
+    internal_guard_router, prefix="/guard/internal", tags=["Internal Guard"],
     dependencies=[Depends(get_current_user)]
 )
 
