@@ -783,6 +783,22 @@ class Database:
                     )
                 """)
 
+                # Phase 3 of the reinforcement plan: internal guard. Findings
+                # from all 3 detectors (baseline_deviation, escalation_chain,
+                # cross_tenant_reach) land in one table, distinguished by
+                # flag_type -- soft-flag only, this is a report, not a gate.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.internal_flags (
+                        id             SERIAL PRIMARY KEY,
+                        flag_type      TEXT NOT NULL,
+                        tenant_id      TEXT,
+                        module_source  TEXT,
+                        details        JSONB,
+                        created_at     TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_guard_internal_flags_type ON cgc_guard.internal_flags(flag_type)")
+
                 conn.commit()
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:
