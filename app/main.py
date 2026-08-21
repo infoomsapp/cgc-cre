@@ -344,47 +344,6 @@ async def trace_execution(request: Request, call_next: Any) -> Any:
     return response
 
 # =========================
-# TEMP DIAGNOSTIC — remove after diagnosing the empty-PoD-chain report
-# =========================
-@app.get("/pod/self-test/diag", tags=["System"], dependencies=[Depends(get_current_user)])
-async def pod_diag() -> Dict[str, Any]:
-    out: Dict[str, Any] = {
-        "app_pod_is_none": app.pod is None,
-    }
-    if app.pod is not None:
-        out["repo_is_none"] = app.pod._repo is None
-        if app.pod._repo is not None:
-            try:
-                height = await app.pod._repo.get_chain_height("diag-probe-tenant")
-                out["repo_query_ok"] = True
-                out["chain_height_probe"] = height
-            except Exception as e:
-                out["repo_query_ok"] = False
-                out["repo_query_error"] = str(e)
-
-        try:
-            iid = app.pod.begin_intercept(
-                decision_id="diag-decision-001",
-                tenant_id="diag-probe-tenant",
-                model_identifier="diag/self-test/v1",
-                input_payload={"probe": True}
-            )
-            out["begin_intercept_ok"] = True
-            out["intercept_id"] = iid
-            triplet, block = await app.pod.seal_intercept(
-                intercept_id=iid,
-                output_payload={"probe_result": "ok"},
-                governance_outcome="APPROVE"
-            )
-            out["seal_intercept_ok"] = True
-            out["block_number"] = block.block_number
-            out["block_hash"] = block.block_hash
-        except Exception as e:
-            out["seal_intercept_ok"] = False
-            out["seal_intercept_error"] = str(e)
-    return out
-
-# =========================
 # HEALTH + GOVERNANCE
 # =========================
 @app.get("/health", tags=["System"])

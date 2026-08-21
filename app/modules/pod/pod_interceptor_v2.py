@@ -531,9 +531,22 @@ class PoDInterceptor:
     # -------------------------------------------------------------------------
 
     def _hash_payload(self, payload: Any) -> str:
-        """SHA256 of any payload. Normalizes to JSON for dict/list."""
+        """
+        SHA256 of any payload. Normalizes to JSON for dict/list.
+
+        `default=str` is load-bearing, not decorative: this is called on
+        the real /governance/decision response, which can carry Decimal
+        scores, datetimes, or Enum members depending on which modules ran
+        -- json.dumps() raises TypeError on any of those with no fallback,
+        which used to propagate all the way up through seal_intercept()
+        and get silently swallowed by main.py's `except Exception` wrapper
+        around that call, meaning the whole PoD seal for that decision
+        never happened. A hash only needs a deterministic, faithful string
+        form -- str() on the odd non-native value is enough, and never
+        changes the hash for anything that was already serializable.
+        """
         if isinstance(payload, (dict, list)):
-            raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+            raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
         elif isinstance(payload, bytes):
             raw = payload.decode("utf-8", errors="replace")
         else:
