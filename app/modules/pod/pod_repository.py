@@ -16,6 +16,7 @@ Env var: CGC_DATABASE_URL=postgresql://user:pass@host:5432/cgc_core
 Olympus Mont Systems LLC © 2026
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -62,51 +63,72 @@ def _ledger_uid(value: str) -> str:
 # ============================================================================
 
 _pool: Optional[Any] = None
+_pool_lock: Optional[Any] = None  # created lazily -- see get_pool()
 
 
 async def get_pool() -> Optional[Any]:
     """
     Get or create the global asyncpg connection pool.
     Returns None if DB unavailable — callers fall back to in-memory.
+
+    Guarded by an asyncio.Lock, double-checked before and after acquiring
+    it. Found live: 5 genuinely concurrent /governance/decision calls for
+    the same tenant (a real Vercel cold instance, _pool still None) all
+    independently saw `_pool is None` and each launched its OWN
+    asyncpg.create_pool() at the same time -- an unguarded "cache
+    stampede". Firing 5 simultaneous new-connection bursts at Supabase's
+    PgBouncer is exactly the kind of burst a transient rejection would
+    hit, and get_pool()'s own except swallowed whichever ones failed,
+    returning None with no detail -- confirmed via a temporary diagnostic
+    that bypassed every wrapping try/except (all 5 failed identically
+    with no pool ever available). The lock makes every caller after the
+    first simply await the one real creation instead of racing it.
     """
-    global _pool
+    global _pool, _pool_lock
     if _pool is not None:
         return _pool
 
-    if not ASYNCPG_AVAILABLE:
-        logger.warning("[PoDRepo] asyncpg not installed — pip install asyncpg")
-        return None
+    if _pool_lock is None:
+        _pool_lock = asyncio.Lock()
 
-    # Same fallback as cgc_db_loader.py: CGC_DATABASE_URL was never
-    # provisioned as a separate database -- cgc_pod lives in the same
-    # Postgres as DATABASE_URL (Database._create_pod_schema() creates it
-    # there). Falling back to DATABASE_URL means this works with zero new
-    # secrets.
-    dsn = (
-        os.getenv("CGC_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or "postgresql://cgc_user:cgc_password@localhost:5432/cgc_core"
-    )
+    async with _pool_lock:
+        if _pool is not None:  # someone else won the race while we waited
+            return _pool
 
-    try:
-        _pool = await asyncpg.create_pool(
-            dsn=dsn,
-            min_size=2,
-            max_size=10,
-            command_timeout=30,
-            # Supabase's connection pooler runs PgBouncer in transaction
-            # mode, which doesn't support asyncpg's default server-side
-            # prepared statements (each "connection" can be a different
-            # backend per transaction) -- disabling the statement cache is
-            # the standard asyncpg+PgBouncer mitigation.
-            statement_cache_size=0,
-            server_settings={"application_name": "cgc_pod_interceptor"}
+        if not ASYNCPG_AVAILABLE:
+            logger.warning("[PoDRepo] asyncpg not installed — pip install asyncpg")
+            return None
+
+        # Same fallback as cgc_db_loader.py: CGC_DATABASE_URL was never
+        # provisioned as a separate database -- cgc_pod lives in the same
+        # Postgres as DATABASE_URL (Database._create_pod_schema() creates
+        # it there). Falling back to DATABASE_URL means this works with
+        # zero new secrets.
+        dsn = (
+            os.getenv("CGC_DATABASE_URL")
+            or os.getenv("DATABASE_URL")
+            or "postgresql://cgc_user:cgc_password@localhost:5432/cgc_core"
         )
-        logger.info("[PoDRepo] PostgreSQL connection pool established")
-        return _pool
-    except Exception as e:
-        logger.error(f"[PoDRepo] Failed to connect to PostgreSQL: {e}")
-        return None
+
+        try:
+            _pool = await asyncpg.create_pool(
+                dsn=dsn,
+                min_size=2,
+                max_size=10,
+                command_timeout=30,
+                # Supabase's connection pooler runs PgBouncer in transaction
+                # mode, which doesn't support asyncpg's default server-side
+                # prepared statements (each "connection" can be a different
+                # backend per transaction) -- disabling the statement cache is
+                # the standard asyncpg+PgBouncer mitigation.
+                statement_cache_size=0,
+                server_settings={"application_name": "cgc_pod_interceptor"}
+            )
+            logger.info("[PoDRepo] PostgreSQL connection pool established")
+            return _pool
+        except Exception as e:
+            logger.error(f"[PoDRepo] Failed to connect to PostgreSQL: {e}")
+            return None
 
 
 async def close_pool() -> None:
