@@ -395,24 +395,50 @@ class PoDInterceptor:
             pii_fields_count=pii_count
         )
 
-        # Seal into the immutable chain (in-memory always)
-        block = self._seal_to_chain(triplet, governance_outcome, compliance_score)
-
-        # Persist to PostgreSQL (if repository is available)
-        db_meta: Optional[Dict] = None
+        # Seal into the chain. When the DB repository is available, block
+        # numbering/previous-hash MUST come from Postgres (the only state
+        # shared across Vercel instances/cold starts) -- computing them
+        # in-memory first and overwriting afterward, as this used to do,
+        # meant every fresh instance independently believed it was sealing
+        # block #0, since self._chain always starts empty. block_factory
+        # builds the actual PoDBlock (hash computed via _compute_block_hash)
+        # from the DB-safe (next_number, prev_hash) pair, while
+        # seal_block_atomic holds a per-tenant advisory lock so no
+        # concurrent seal for the same tenant can race it.
+        block = None
         if self._repo:
-            try:
-                db_meta = await self._repo.persist(
-                    triplet=triplet,
-                    block=block,
-                    decision_id=pending["decision_id"]
+            def block_factory(next_number: int, prev_hash: str) -> PoDBlock:
+                b = PoDBlock(
+                    block_uuid=str(uuid.uuid4()),
+                    tenant_id=triplet.tenant_id,
+                    intercept_id=triplet.intercept_id,
+                    decision_id=triplet.decision_id,
+                    block_number=next_number,
+                    previous_block_hash=prev_hash,
+                    block_hash="",
+                    triplet_hash=triplet.triplet_hash,
+                    governance_outcome=governance_outcome,
+                    compliance_score=compliance_score,
+                    sealed_at=datetime.now(timezone.utc).isoformat(),
+                    sealed_by="cgc-pod-interceptor-v2"
                 )
-                # Sync authoritative block_hash from DB back to in-memory block
-                if db_meta and db_meta.get("block_hash"):
-                    block.block_hash    = db_meta["block_hash"]
-                    block.block_number  = db_meta["block_number"]
+                b.block_hash = self._compute_block_hash(b, prev_hash)
+                return b
+
+            try:
+                block = await self._repo.seal_block_atomic(
+                    triplet=triplet,
+                    governance_outcome=governance_outcome,
+                    compliance_score=compliance_score,
+                    block_factory=block_factory
+                )
             except Exception as e:
-                logger.error(f"[PoD] DB persist failed: {e} — proof sealed in-memory only")
+                logger.error(f"[PoD] DB seal failed: {e} — falling back to in-memory")
+
+        if block is None:
+            # DB unavailable or the atomic seal failed -- fall back to the
+            # local in-memory chain (single-process only, dev/degraded mode).
+            block = self._seal_to_chain(triplet, governance_outcome, compliance_score)
 
         logger.info(
             f"[PoD] Intercept SEALED | ID: {intercept_id[:8]}... | "
@@ -505,9 +531,22 @@ class PoDInterceptor:
     # -------------------------------------------------------------------------
 
     def _hash_payload(self, payload: Any) -> str:
-        """SHA256 of any payload. Normalizes to JSON for dict/list."""
+        """
+        SHA256 of any payload. Normalizes to JSON for dict/list.
+
+        `default=str` is load-bearing, not decorative: this is called on
+        the real /governance/decision response, which can carry Decimal
+        scores, datetimes, or Enum members depending on which modules ran
+        -- json.dumps() raises TypeError on any of those with no fallback,
+        which used to propagate all the way up through seal_intercept()
+        and get silently swallowed by main.py's `except Exception` wrapper
+        around that call, meaning the whole PoD seal for that decision
+        never happened. A hash only needs a deterministic, faithful string
+        form -- str() on the odd non-native value is enough, and never
+        changes the hash for anything that was already serializable.
+        """
         if isinstance(payload, (dict, list)):
-            raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+            raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
         elif isinstance(payload, bytes):
             raw = payload.decode("utf-8", errors="replace")
         else:
