@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Annotated, Any, Final, Optional, Dict, List
 from time import perf_counter_ns
 
-from fastapi import FastAPI, Depends, Request, Header, status, Form
+from fastapi import FastAPI, Depends, Request, Header, status, Form, Query
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, ConfigDict
@@ -693,6 +693,23 @@ async def get_governance_report(
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="cgc_report_{app_source}_{from_date}_to_{to_date}.pdf"'}
     )
+
+
+@app.get("/governance/timeseries/{app_source}", tags=["Governance"])
+async def get_governance_timeseries(
+    app_source: str,
+    hours: int = Query(24, ge=1, le=168),
+    user=Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Real hourly decision volume + approval rate for one connected app, from
+    cgc_tco.audit_trail -- powers the Governance dashboard's live chart
+    (2026-08-22). Read-only, same TCO instance every other governance route
+    uses (app.tco).
+    """
+    if app_source not in ALLOWED_APP_SOURCES:
+        raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
+    return app.tco.get_decision_timeseries(app_source, hours=hours)
 
 
 @app.get("/governance/modules/{module_name}/metrics", tags=["Governance"])

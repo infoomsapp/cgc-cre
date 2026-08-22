@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
 
+from app.Core.db.database import get_database
 from app.modules.guard.payload_guard import get_recent_suspicious_payloads
 from app.modules.guard.internal_guard import get_recent_internal_flags
 from app.modules.guard.login_guard import get_login_activity_stats
@@ -41,3 +42,10 @@ async def list_internal_flags(
 @router.get("/login-stats", summary="Login activity + credential-stuffing-flagged IPs")
 async def login_stats(hours: int = Query(24, ge=1, le=168)) -> Dict[str, Any]:
     return get_login_activity_stats(hours=hours)
+
+
+@router.get("/timeseries", summary="Hourly guard event counts (payloads/flags/failed logins)")
+async def guard_timeseries(hours: int = Query(24, ge=1, le=168)) -> Dict[str, Any]:
+    """Powers the Security dashboard's live chart. See
+    Database.get_guard_events_timeseries()'s docstring for the query shape."""
+    return get_database().get_guard_events_timeseries(hours=hours)

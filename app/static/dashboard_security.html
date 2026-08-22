@@ -75,6 +75,12 @@
   section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
   .sectionhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
   .sectionhead h2 { margin: 0; }
+
+  .chartCard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 22px; }
+  .chartCard .chartHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .chartLegend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); }
+  .chartLegend .lg { display: flex; align-items: center; gap: 5px; }
+  .chartLegend .sw { width: 8px; height: 2px; border-radius: 1px; }
   .bulk-delete-btn { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; }
   .bulk-delete-btn:disabled { opacity: 0.35; cursor: default; }
   th.checkcol, td.checkcol { width: 32px; }
@@ -133,6 +139,21 @@
     <a href="/dashboard/scoring">Scoring</a>
     <a href="/dashboard/security" class="active">Security</a>
   </nav>
+
+  <section>
+    <h2>Guard Events (24h)</h2>
+    <div class="chartCard">
+      <div class="chartHead">
+        <span class="sub">Hourly counts, real per-event data</span>
+        <div class="chartLegend">
+          <span class="lg"><span class="sw" style="background:var(--red)"></span>Suspicious payloads</span>
+          <span class="lg"><span class="sw" style="background:var(--amber)"></span>Internal flags</span>
+          <span class="lg"><span class="sw" style="background:var(--muted)"></span>Failed logins</span>
+        </div>
+      </div>
+      <div id="guardChart"></div>
+    </div>
+  </section>
 
   <section>
     <h2>Guard Activity</h2>
@@ -211,6 +232,60 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// ---- Guard events chart (real hourly data from GET /guard/activity/timeseries) ----
+function renderGuardLineChart(buckets, hours) {
+  const series = [
+    { key: 'suspicious_payloads', color: 'var(--red)' },
+    { key: 'internal_flags', color: 'var(--amber)' },
+    { key: 'failed_logins', color: 'var(--muted)' },
+  ];
+  const now = new Date(); now.setUTCMinutes(0, 0, 0, 0);
+  const axis = [];
+  for (let i = hours - 1; i >= 0; i--) axis.push(new Date(now.getTime() - i * 3600000));
+  const byHour = {};
+  (buckets || []).forEach(b => { byHour[new Date(b.bucket).getTime()] = b; });
+
+  const W = 720, H = 150, padT = 10, padB = 20;
+  const chartH = H - padT - padB;
+  const n = axis.length;
+  const maxVal = Math.max(1, ...axis.map(d => {
+    const b = byHour[d.getTime()];
+    return b ? Math.max(b.suspicious_payloads || 0, b.internal_flags || 0, b.failed_logins || 0) : 0;
+  }));
+
+  const lines = series.map(s => {
+    const pts = axis.map((d, i) => {
+      const b = byHour[d.getTime()];
+      const v = b ? (b[s.key] || 0) : 0;
+      const x = n > 1 ? (i / (n - 1)) * W : 0;
+      const y = padT + chartH - (v / maxVal) * chartH;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.75"/>`;
+  }).join('');
+
+  const tickEvery = Math.max(1, Math.round(n / 8));
+  let ticks = '';
+  axis.forEach((d, i) => {
+    if (i % tickEvery !== 0) return;
+    const x = n > 1 ? (i / (n - 1)) * W : 0;
+    ticks += `<text x="${x.toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="var(--muted)" font-family="var(--mono)">${d.toISOString().slice(11, 13)}h</text>`;
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${lines}${ticks}</svg>`;
+}
+
+async function loadGuardChart() {
+  try {
+    const data = await api('/guard/activity/timeseries?hours=24');
+    document.getElementById('guardChart').innerHTML = (data.buckets && data.buckets.length)
+      ? renderGuardLineChart(data.buckets, 24)
+      : '<div class="empty">No guard events in the last 24h</div>';
+  } catch (e) {
+    document.getElementById('guardChart').innerHTML = `<div class="empty">Chart unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
 async function refresh() {
   try {
     const [stats, errs, loginStats, payloads, internalFlags] = await Promise.all([
@@ -220,6 +295,8 @@ async function refresh() {
       api('/guard/activity/suspicious-payloads?limit=20'),
       api('/guard/activity/internal-flags?limit=20'),
     ]);
+
+    await loadGuardChart();
 
     document.getElementById('dot').style.background = 'var(--green)';
     document.getElementById('gateErr').textContent = '';

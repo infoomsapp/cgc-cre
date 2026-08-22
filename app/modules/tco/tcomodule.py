@@ -704,6 +704,49 @@ class TCO:
             logger.error(f"[TCO] Get audit trail by app failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    def get_decision_timeseries(self, app_source: str, hours: int = 24) -> Dict[str, Any]:
+        """
+        Real hourly decision volume + approval rate for one connected app,
+        powering the Governance dashboard's live chart (2026-08-22). `timestamp`
+        is stored as ISO8601 text ending in "Z" (datetime.utcnow().isoformat()
+        + "Z", see log_decision) -- casts cleanly to timestamptz since the "Z"
+        makes it unambiguous UTC. Buckets with zero decisions are NOT returned
+        by the query (there's no row to group), so the caller fills gaps
+        itself against a real hour axis rather than assuming a continuous
+        series -- a quiet hour is real signal on a governance dashboard, not
+        something to interpolate away.
+        """
+        try:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return {"status": "error", "message": "no database connection", "buckets": []}
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT
+                        date_trunc('hour', timestamp::timestamptz) AS bucket,
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE outcome = 'APPROVE') AS approved
+                    FROM cgc_tco.audit_trail
+                    WHERE app_source = %s
+                      AND timestamp::timestamptz >= NOW() - (%s * INTERVAL '1 hour')
+                    GROUP BY bucket
+                    ORDER BY bucket
+                ''', (app_source, hours))
+                rows = cursor.fetchall()
+
+            buckets = [
+                {
+                    "bucket": row["bucket"].isoformat(),
+                    "total": row["total"],
+                    "approved": row["approved"],
+                }
+                for row in rows
+            ]
+            return {"app_source": app_source, "hours": hours, "buckets": buckets}
+        except Exception as e:
+            logger.error(f"[TCO] Get decision timeseries failed: {e}")
+            return {"status": "error", "message": str(e), "buckets": []}
+
     def generate_app_report_pdf(self, app_source: str, from_date: str, to_date: str) -> bytes:
         """
         Builds an in-memory PDF: a decision summary + the full audit chain

@@ -1161,6 +1161,53 @@ class Database:
             logger.error(f"[cleanup] cgc_guard cleanup failed: {e}")
             return {"error": str(e)}
 
+    def get_guard_events_timeseries(self, hours: int = 24) -> Dict[str, Any]:
+        """
+        Real hourly counts of suspicious payloads, internal-guard flags, and
+        failed logins, from their own real per-event created_at columns --
+        powers the Security dashboard's live chart (2026-08-22). Three
+        separate GROUP BY queries merged by hour bucket in Python (simpler
+        and more obviously correct than one UNION query across 3 differently
+        -shaped tables) -- volume here is low (these only fire on real
+        pattern matches/failures, not every request), so 3 small queries
+        cost nothing that matters. Buckets with zero events on all 3 tables
+        are omitted, same reasoning as TCO.get_decision_timeseries.
+        """
+        if not self.use_postgres:
+            return {"error": "timeseries only available in PostgreSQL mode", "buckets": []}
+
+        # (result key, full FROM+WHERE clause) -- each query is independent
+        # and complete, no string-splicing between them.
+        queries = [
+            ("suspicious_payloads",
+             "SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS c "
+             "FROM cgc_guard.suspicious_payloads "
+             "WHERE created_at >= NOW() - (%s * INTERVAL '1 hour') GROUP BY bucket"),
+            ("internal_flags",
+             "SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS c "
+             "FROM cgc_guard.internal_flags "
+             "WHERE created_at >= NOW() - (%s * INTERVAL '1 hour') GROUP BY bucket"),
+            ("failed_logins",
+             "SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS c "
+             "FROM cgc_guard.login_attempts "
+             "WHERE success = FALSE AND created_at >= NOW() - (%s * INTERVAL '1 hour') GROUP BY bucket"),
+        ]
+        merged: Dict[str, Dict[str, int]] = {}
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                for key, sql in queries:
+                    cur.execute(sql, (hours,))
+                    for row in cur.fetchall():
+                        bkt = row["bucket"].isoformat()
+                        merged.setdefault(bkt, {"suspicious_payloads": 0, "internal_flags": 0, "failed_logins": 0})
+                        merged[bkt][key] = row["c"]
+            buckets = [{"bucket": b, **v} for b, v in sorted(merged.items())]
+            return {"hours": hours, "buckets": buckets}
+        except Exception as e:
+            logger.error(f"[guard] timeseries query failed: {e}")
+            return {"error": str(e), "buckets": []}
+
     def _create_auth_schema(self):
         """
         AuthSystem (app/Core/auth/auth_system.py) stored users/sessions/

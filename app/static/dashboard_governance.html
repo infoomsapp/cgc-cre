@@ -20,6 +20,12 @@
     --amber-bg: rgba(232,180,84,0.12);
     --green: #4ed892;
     --green-bg: rgba(78,216,146,0.12);
+    /* Matches LedgiProof's "Certification Blue" semaphore color exactly
+       (semaphore.blue.DEFAULT, tailwind.config.ts) -- approved decisions
+       here use the same blue as a verified/certified record over there,
+       deliberately not this page's own --accent green. */
+    --verified-blue: #2563eb;
+    --verified-blue-bg: rgba(37,99,235,0.12);
     --mono: ui-monospace, "SF Mono", Consolas, monospace;
     --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   }
@@ -76,6 +82,16 @@
   .mod .m-name { font-family: var(--mono); font-size: 11.5px; }
   .empty { color: var(--muted); font-size: 12.5px; padding: 20px; text-align: center; }
 
+  .chartCard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .chartCard .chartHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .chartCard .chartTitle { font-size: 12px; font-weight: 700; }
+  .chartLegend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); }
+  .chartLegend .lg { display: flex; align-items: center; gap: 5px; }
+  .chartLegend .sw { width: 8px; height: 8px; border-radius: 2px; }
+  .chartTabs { display: flex; gap: 6px; }
+  .chartTabs button { background: none; border: 1px solid var(--border); color: var(--muted); font-size: 10.5px; padding: 3px 9px; border-radius: 5px; cursor: pointer; }
+  .chartTabs button.active { color: #04140e; background: var(--accent); border-color: var(--accent); }
+
   .field { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--mono); font-size: 12.5px; }
   .reportControls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
   .reportControls .fieldGroup { display: flex; flex-direction: column; gap: 4px; }
@@ -122,6 +138,23 @@
   <section>
     <h2>Governance Modules</h2>
     <div class="modgrid" id="modGrid"></div>
+  </section>
+
+  <section>
+    <h2>Decision Volume (24h)</h2>
+    <div class="chartCard">
+      <div class="chartHead">
+        <div class="chartTabs" id="volAppTabs">
+          <button class="active" data-app="ledgiproof" onclick="setVolApp(this)">LedgiProof</button>
+          <button data-app="ledgiproof-tax-pro" onclick="setVolApp(this)">Tax Pro</button>
+        </div>
+        <div class="chartLegend">
+          <span class="lg"><span class="sw" style="background:var(--verified-blue)"></span>Approved</span>
+          <span class="lg"><span class="sw" style="background:var(--amber)"></span>Other outcome</span>
+        </div>
+      </div>
+      <div id="volChart"></div>
+    </div>
   </section>
 
   <section>
@@ -184,6 +217,74 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// ---- Decision volume chart (real hourly data from GET /governance/timeseries/{app}) ----
+let volApp = 'ledgiproof';
+function setVolApp(btn) {
+  volApp = btn.dataset.app;
+  document.querySelectorAll('#volAppTabs button').forEach(b => b.classList.toggle('active', b === btn));
+  loadVolumeChart();
+}
+
+function renderStackedBarChart(buckets, hours) {
+  // Builds a continuous hour axis (fills gaps with 0) so a quiet hour reads
+  // as a real gap in activity, not a missing data point -- see
+  // TCO.get_decision_timeseries()'s docstring for why the API itself
+  // doesn't zero-fill server-side.
+  const now = new Date(); now.setUTCMinutes(0, 0, 0, 0);
+  const axis = [];
+  for (let i = hours - 1; i >= 0; i--) axis.push(new Date(now.getTime() - i * 3600000));
+  const byHour = {};
+  (buckets || []).forEach(b => { byHour[new Date(b.bucket).getTime()] = b; });
+
+  const W = 720, H = 170, padT = 8, padB = 20;
+  const chartH = H - padT - padB;
+  const n = axis.length;
+  const slot = W / n;
+  const barW = Math.max(2, slot - 3);
+  const maxTotal = Math.max(1, ...axis.map(d => (byHour[d.getTime()] || {}).total || 0));
+
+  let bars = '';
+  axis.forEach((d, i) => {
+    const b = byHour[d.getTime()];
+    const total = b ? b.total : 0;
+    const approved = b ? b.approved : 0;
+    const other = total - approved;
+    const x = i * slot + (slot - barW) / 2;
+    const hApproved = total ? Math.max((approved / maxTotal) * chartH, approved > 0 ? 2 : 0) : 0;
+    const hOther = total ? (other / maxTotal) * chartH : 0;
+    const yApproved = padT + chartH - hApproved;
+    const yOther = yApproved - hOther;
+    const label = `${d.toISOString().slice(11, 16)} UTC — ${total} decision${total === 1 ? '' : 's'}${total ? `, ${approved} approved` : ''}`;
+    if (total === 0) {
+      bars += `<rect x="${x.toFixed(1)}" y="${(padT + chartH - 1).toFixed(1)}" width="${barW}" height="1" fill="var(--border)"><title>${esc(label)}</title></rect>`;
+    } else {
+      if (hOther > 0) bars += `<rect x="${x.toFixed(1)}" y="${yOther.toFixed(1)}" width="${barW}" height="${hOther.toFixed(1)}" fill="var(--amber)" rx="1"><title>${esc(label)}</title></rect>`;
+      bars += `<rect x="${x.toFixed(1)}" y="${yApproved.toFixed(1)}" width="${barW}" height="${hApproved.toFixed(1)}" fill="var(--verified-blue)" rx="1"><title>${esc(label)}</title></rect>`;
+    }
+  });
+
+  const tickEvery = Math.max(1, Math.round(n / 8));
+  let ticks = '';
+  axis.forEach((d, i) => {
+    if (i % tickEvery !== 0) return;
+    const x = i * slot + slot / 2;
+    ticks += `<text x="${x.toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="var(--muted)" font-family="var(--mono)">${d.toISOString().slice(11, 13)}h</text>`;
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${bars}${ticks}</svg>`;
+}
+
+async function loadVolumeChart() {
+  try {
+    const data = await api(`/governance/timeseries/${volApp}?hours=24`);
+    document.getElementById('volChart').innerHTML = (data.buckets && data.buckets.length)
+      ? renderStackedBarChart(data.buckets, 24)
+      : '<div class="empty">No decisions in the last 24h</div>';
+  } catch (e) {
+    document.getElementById('volChart').innerHTML = `<div class="empty">Chart unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
 async function refresh() {
   try {
     const nodes = await api('/status/nodes');
@@ -195,6 +296,8 @@ async function refresh() {
       const active = mods[k] && (mods[k].status === 'active' || mods[k].status === 'ACTIVE' || mods[k].total_evaluations !== undefined);
       return `<div class="mod"><span class="m-dot ${active ? '' : 'off'}"></span><span class="m-name">${esc(k)}</span></div>`;
     }).join('') || '<div class="empty">No module data</div>';
+
+    await loadVolumeChart();
 
     document.getElementById('lastRefresh').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {

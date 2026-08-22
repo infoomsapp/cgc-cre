@@ -82,6 +82,8 @@
   .flowSignal { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--muted); }
   .flowSignal .fsVal { font-family: var(--mono); color: var(--text); white-space: nowrap; }
   .flowSignal.info { opacity: 0.7; font-style: italic; }
+  .sparkWrap { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .sparkLabel { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
 </style>
 </head>
 <body>
@@ -167,7 +169,48 @@ function scoreClass(score) {
   return 'bad';
 }
 
-function renderFlowCard(appLabel, data) {
+// ---- Session sparkline ----
+// flow_score has no stored historical series server-side (only a current-
+// vs-baseline snapshot -- see FlowScoring.compute_flow_score()), so this
+// accumulates each 30s poll's value in memory for as long as this tab
+// stays open, rather than fabricating history that doesn't exist. Capped
+// at 60 points (30 min at the existing poll interval) -- a live trend
+// since the page was opened, explicitly labeled as such, not a claim of
+// real historical data.
+const SCORE_HISTORY = {};
+const MAX_SPARK_POINTS = 60;
+
+function pushScoreHistory(appKey, score) {
+  if (score === null || score === undefined) return;
+  const h = SCORE_HISTORY[appKey] || (SCORE_HISTORY[appKey] = []);
+  h.push(score);
+  if (h.length > MAX_SPARK_POINTS) h.shift();
+}
+
+function renderSparkline(appKey) {
+  const h = SCORE_HISTORY[appKey] || [];
+  if (h.length < 2) return '';
+  const W = 260, H = 34, pad = 2;
+  const min = Math.min(...h), max = Math.max(...h);
+  const range = (max - min) || 1;
+  const pts = h.map((v, i) => {
+    const x = (i / (h.length - 1)) * (W - pad * 2) + pad;
+    const y = H - pad - ((v - min) / range) * (H - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const lastX = W - pad;
+  const lastY = H - pad - ((h[h.length - 1] - min) / range) * (H - pad * 2);
+  return `
+    <div class="sparkWrap">
+      <div class="sparkLabel">Trend since page opened (${h.length} sample${h.length === 1 ? '' : 's'})</div>
+      <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">
+        <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+        <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="2.5" fill="var(--accent)"/>
+      </svg>
+    </div>`;
+}
+
+function renderFlowCard(appKey, appLabel, data) {
   if (!data || data.insufficient_data) {
     const have = data ? data.sample_sizes.baseline_total : 0;
     return `
@@ -177,6 +220,7 @@ function renderFlowCard(appLabel, data) {
       </div>`;
   }
   const s = data.signals;
+  pushScoreHistory(appKey, data.flow_score);
   return `
     <div class="flowCard">
       <div class="flowHead">
@@ -190,6 +234,7 @@ function renderFlowCard(appLabel, data) {
         <div class="flowSignal"><span>Score volatility</span><span class="fsVal">${fmtStddev(s.score_volatility.current_stddev)} (was ${fmtStddev(s.score_volatility.baseline_stddev)})</span></div>
         <div class="flowSignal info"><span>Human-review load</span><span class="fsVal">${fmtPct(s.human_review_load.current_rate)} (was ${fmtPct(s.human_review_load.baseline_rate)})</span></div>
       </div>
+      ${renderSparkline(appKey)}
     </div>`;
 }
 
@@ -201,7 +246,8 @@ async function refresh() {
     ]);
 
     document.getElementById('flowCards').innerHTML =
-      renderFlowCard('LedgiProof', flowLp) + renderFlowCard('LedgiProof Tax Pro', flowLtp);
+      renderFlowCard('ledgiproof', 'LedgiProof', flowLp) +
+      renderFlowCard('ledgiproof-tax-pro', 'LedgiProof Tax Pro', flowLtp);
     document.getElementById('dot').style.background = 'var(--green)';
     document.getElementById('gateErr').textContent = '';
 
