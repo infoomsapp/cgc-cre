@@ -587,34 +587,71 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_ledger_decision
                     ON cgc_pod.pod_ledger (decision_id, tenant_id)
                 """)
+                # Best-effort defense-in-depth: the real fix for concurrent/
+                # cold-start block numbering is the per-tenant advisory lock
+                # in PoDRepository.seal_block_atomic() (app/modules/pod/
+                # pod_repository.py), which makes it correct going forward.
+                # This constraint is a second layer that turns any future
+                # (tenant_id, block_number) collision into a loud, rejected
+                # INSERT instead of a silent chain fork.
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        ALTER TABLE cgc_pod.pod_ledger
+                            ADD CONSTRAINT ux_pod_ledger_tenant_block UNIQUE (tenant_id, block_number);
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                        WHEN unique_violation THEN
+                            RAISE WARNING 'cgc_pod.pod_ledger has pre-existing duplicate (tenant_id, block_number) rows -- constraint not applied; check GET /verify/chain/integrity per tenant';
+                    END $$;
+                """)
                 # Append-only: the whole point of a tamper-evident chain is
                 # that a sealed block can never be edited or removed. Uses a
                 # trigger, not a RULE -- Postgres flatly rejects any INSERT
                 # ... ON CONFLICT against a table that has rules ("INSERT with
                 # ON CONFLICT clause cannot be used with table that has
-                # INSERT or UPDATE rules"), and save_intercept_and_block's
+                # INSERT or UPDATE rules"), and seal_block_atomic's
                 # ON CONFLICT (block_hash) DO NOTHING needs to stay for safe
                 # retries. Triggers don't have that restriction.
                 # Drop the RULEs from the first (broken) version of this
                 # method -- they already landed on the real table and a
                 # bare CREATE TABLE IF NOT EXISTS above doesn't remove them.
-                cur.execute("DROP RULE IF EXISTS pod_ledger_no_update ON cgc_pod.pod_ledger")
-                cur.execute("DROP RULE IF EXISTS pod_ledger_no_delete ON cgc_pod.pod_ledger")
+                #
+                # All 5 statements run inside one PL/pgSQL DO block with a
+                # catch-all handler: this whole method shares ONE psycopg2
+                # connection/transaction across every statement, and unlike
+                # a Python-level try/except, only a DO block's own implicit
+                # savepoint can cleanly roll back a failed DDL statement
+                # here without leaving the connection "stuck" in an aborted-
+                # transaction state for every statement still to come on it
+                # (the chain_integrity_log table below, and this connection
+                # if handed back to the pool mid-poisoned). Genuinely
+                # unreachable in normal operation (every clause is already
+                # idempotent via IF EXISTS/OR REPLACE), but the incident
+                # this is hardening against was never fully root-caused, so
+                # this closes the one concrete mechanism identified for how
+                # DDL here could have poisoned a pooled connection.
                 cur.execute("""
-                    CREATE OR REPLACE FUNCTION cgc_pod.prevent_ledger_mutation()
-                    RETURNS TRIGGER AS $$
+                    DO $do$
                     BEGIN
-                        RAISE EXCEPTION 'cgc_pod.pod_ledger is append-only: % not permitted', TG_OP;
-                    END;
-                    $$ LANGUAGE plpgsql
-                """)
-                cur.execute("""
-                    DROP TRIGGER IF EXISTS pod_ledger_append_only ON cgc_pod.pod_ledger
-                """)
-                cur.execute("""
-                    CREATE TRIGGER pod_ledger_append_only
-                    BEFORE UPDATE OR DELETE ON cgc_pod.pod_ledger
-                    FOR EACH ROW EXECUTE FUNCTION cgc_pod.prevent_ledger_mutation()
+                        DROP RULE IF EXISTS pod_ledger_no_update ON cgc_pod.pod_ledger;
+                        DROP RULE IF EXISTS pod_ledger_no_delete ON cgc_pod.pod_ledger;
+
+                        CREATE OR REPLACE FUNCTION cgc_pod.prevent_ledger_mutation()
+                        RETURNS TRIGGER AS $func$
+                        BEGIN
+                            RAISE EXCEPTION 'cgc_pod.pod_ledger is append-only: % not permitted', TG_OP;
+                        END;
+                        $func$ LANGUAGE plpgsql;
+
+                        DROP TRIGGER IF EXISTS pod_ledger_append_only ON cgc_pod.pod_ledger;
+                        CREATE TRIGGER pod_ledger_append_only
+                        BEFORE UPDATE OR DELETE ON cgc_pod.pod_ledger
+                        FOR EACH ROW EXECUTE FUNCTION cgc_pod.prevent_ledger_mutation();
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            RAISE WARNING 'cgc_pod.pod_ledger append-only trigger setup failed (non-fatal): %', SQLERRM;
+                    END $do$;
                 """)
 
                 cur.execute("""
