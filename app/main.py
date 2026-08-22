@@ -187,6 +187,27 @@ async def require_admin(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admin required")
     return user
 
+async def require_admin_or_service(user=Depends(get_current_user)):
+    """
+    Same as require_admin, but also accepts the 'service' principal
+    (a caller presenting CGC_SERVICE_API_KEY -- see AuthSystem.verify_token,
+    role "service"). Built for /admin/cleanup/guard-tables specifically:
+    that endpoint is meant to be hit by a scheduler (Vercel Cron, a GitHub
+    Action, cron-job.com), and a normal admin JWT expires after 7 days
+    (AuthSystem.login()), which would mean manually refreshing whatever
+    secret the scheduler holds every week. CGC_SERVICE_API_KEY is already
+    the long-lived, first-party credential this codebase trusts for
+    server-to-server calls (LedgiProof's cgc-evaluate/report-error edge
+    functions use it today) -- reusing it here avoids a second credential
+    with a second rotation story for the exact same trust level. NOT
+    applied to every admin endpoint -- e.g. /admin/users stays strictly
+    admin-only, since the service principal has no legitimate reason to
+    enumerate user accounts.
+    """
+    if user.get("role") not in ("admin", "service"):
+        raise HTTPException(status_code=403, detail="Admin or service credential required")
+    return user
+
 # Mount the application-monitoring router → /monitor/error, /monitor/errors, ...
 # Same Bearer-token auth as every other authenticated endpoint, enforced here
 # at the router level so monitor.py itself carries no auth logic.
@@ -373,7 +394,7 @@ async def list_users(user=Depends(require_admin)):
     return app.auth.list_users()
 
 @app.post("/admin/cleanup/guard-tables", tags=["Admin"])
-async def cleanup_guard_tables(user=Depends(require_admin)):
+async def cleanup_guard_tables(user=Depends(require_admin_or_service)):
     """
     Deletes rows past retention from the 4 cgc_guard.* telemetry tables
     (rate_limit_events, login_attempts, suspicious_payloads,
@@ -382,10 +403,14 @@ async def cleanup_guard_tables(user=Depends(require_admin)):
 
     This process has no scheduler of its own -- wire this endpoint up to
     whatever recurring trigger is available (Vercel Cron, a GitHub Action,
-    cron-job.com, ...) with the admin bearer token. Deliberately does NOT
-    touch cgc_tco.audit_trail or cgc_pod.* -- see
-    Database.cleanup_guard_tables()'s docstring for why those need an
-    archival strategy instead of a plain delete.
+    cron-job.com, ...). Accepts either an admin bearer token or
+    CGC_SERVICE_API_KEY (require_admin_or_service) specifically so a
+    scheduler can use the same long-lived first-party credential this
+    codebase already trusts elsewhere, instead of a 7-day-expiring admin
+    JWT that would need manual weekly renewal. Deliberately does NOT touch
+    cgc_tco.audit_trail or cgc_pod.* -- see Database.cleanup_guard_tables()'s
+    docstring for why those need an archival strategy instead of a plain
+    delete.
     """
     return app.db.cleanup_guard_tables()
 
