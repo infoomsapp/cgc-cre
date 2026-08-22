@@ -98,8 +98,16 @@ class AuthSystem:
             return {}
 
     def _save_users_json(self, users: Dict) -> None:
-        with open(self.users_file, "w") as f:
-            json.dump(users, f, indent=2)
+        """Fallback-only (self._db.use_postgres is False) -- see database.py's
+        _write_json_list docstring for why this needs its own guard: a warm
+        instance that ever falls back to JSON on Vercel's read-only
+        filesystem must degrade gracefully, not crash every write."""
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(self.users_file, "w") as f:
+                json.dump(users, f, indent=2)
+        except Exception as e:
+            logger.warning(f"[auth] JSON fallback write failed for users.json (non-fatal): {e}")
 
     def _load_sessions_json(self) -> Dict:
         try:
@@ -109,8 +117,13 @@ class AuthSystem:
             return {}
 
     def _save_sessions_json(self, sessions: Dict) -> None:
-        with open(self.sessions_file, "w") as f:
-            json.dump(sessions, f, indent=2)
+        """Same fix as _save_users_json -- see that method's docstring."""
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(self.sessions_file, "w") as f:
+                json.dump(sessions, f, indent=2)
+        except Exception as e:
+            logger.warning(f"[auth] JSON fallback write failed for sessions.json (non-fatal): {e}")
 
     def _load_blocked_json(self) -> Dict:
         try:
@@ -120,8 +133,13 @@ class AuthSystem:
             return {"ips": [], "emails": []}
 
     def _save_blocked_json(self, blocked: Dict) -> None:
-        with open(self.blocked_file, "w") as f:
-            json.dump(blocked, f, indent=2)
+        """Same fix as _save_users_json -- see that method's docstring."""
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(self.blocked_file, "w") as f:
+                json.dump(blocked, f, indent=2)
+        except Exception as e:
+            logger.warning(f"[auth] JSON fallback write failed for blocked.json (non-fatal): {e}")
 
     def _json_is_ip_blocked(self, ip: str, blocked: Dict) -> bool:
         return any(entry.get("ip") == ip for entry in blocked.get("ips", []))
