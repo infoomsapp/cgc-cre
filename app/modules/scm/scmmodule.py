@@ -13,7 +13,10 @@ Integrated Features:
 - Persistent Merkle Chain with SQLite
 - Immutable Audit Trail for legal compliance
 - Automatic Key Rotation
-- Compliance Standards (FIPS-140-2, SOC2, ISO27001, HIPAA, PCI-DSS, GDPR, EU-AI-Act)
+- Compliance-standard tracking (cgc_jla.scm_compliance_standards) -- empty by
+  default; this module has never received an independent certification
+  against any framework, so none are asserted here. Populate that table only
+  once a real audit backs a specific entry.
 """
 
 import base64
@@ -904,15 +907,20 @@ class SCM:
         return defaults.get(level, defaults["MEDIUM"])
 
     def _get_compliance_standards(self) -> List[str]:
-        """Load compliance standards from Supabase. Replaces COMPLIANCE_STANDARDS list."""
+        """
+        Real, DB-backed list of standards this deployment has been
+        independently certified against -- empty until one actually has been.
+        Was a hardcoded fallback of 7 major certifications (FIPS-140-2,
+        SOC2-Type2, ISO27001, HIPAA, PCI-DSS-v3.2.1, EU-GDPR, EU-AI-Act) that
+        this system has never received, fed directly into get_metrics(),
+        sign_artifact()'s output, and this module's own init log line -- a
+        compliance claim asserted in code, not backed by any audit.
+        """
         rows = self._db_loader._query(
             "SELECT standard FROM cgc_jla.scm_compliance_standards "
             "WHERE is_active = TRUE ORDER BY standard"
         )
-        if rows:
-            return [r["standard"] for r in rows]
-        return ["FIPS-140-2", "SOC2-Type2", "ISO27001",
-                "HIPAA", "PCI-DSS-v3.2.1", "EU-GDPR", "EU-AI-Act"]
+        return [r["standard"] for r in rows] if rows else []
 
 
     def get_security_policy(self, area: str) -> Dict[str, Any]:

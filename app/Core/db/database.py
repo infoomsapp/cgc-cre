@@ -700,14 +700,14 @@ class Database:
                         ON CONFLICT (sensitivity_level) DO NOTHING
                     """, (level, add_enc, compression, metadata, ttl, req_sig))
 
-                standards = ["FIPS-140-2", "SOC2-Type2", "ISO27001", "HIPAA",
-                             "PCI-DSS-v3.2.1", "EU-GDPR", "EU-AI-Act"]
-                for standard in standards:
-                    cur.execute("""
-                        INSERT INTO cgc_jla.scm_compliance_standards (standard)
-                        VALUES (%s)
-                        ON CONFLICT (standard) DO NOTHING
-                    """, (standard,))
+                # Was seeded with ["FIPS-140-2", "SOC2-Type2", "ISO27001", "HIPAA",
+                # "PCI-DSS-v3.2.1", "EU-GDPR", "EU-AI-Act"] -- certifications
+                # this system has never actually received, fed straight into
+                # SCM.get_metrics()/sign_artifact() and this codebase's own log
+                # line ("Standards: ..."). Nothing seeded here means
+                # scm_compliance_standards stays empty until a real
+                # certification exists to record -- see
+                # SCM._get_compliance_standards()'s matching fallback change.
 
                 conn.commit()
                 logger.info("cgc_jla governance calibration schema created/verified + seeded")

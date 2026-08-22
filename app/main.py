@@ -491,7 +491,13 @@ async def root() -> Dict[str, Any]:
     """Root endpoint with unified system information."""
     return {
         "engine": "CGC CORE v2.2.2 + UNIFIED GOVERNANCE",
-        "compliance": "EU_AI_ACT_2025_COMPLIANT",
+        # Was "compliance": "EU_AI_ACT_2025_COMPLIANT" -- a certification claim
+        # this system has never actually received, asserted directly on the
+        # public unauthenticated root endpoint. ComplianceEngine genuinely
+        # evaluates decisions against EU AI Act criteria (see the "compliance"
+        # module below and /governance/decision's own response) -- that's
+        # real and worth stating; "compliant" as a status is not, until an
+        # independent audit says so. Removed rather than reworded.
         "architecture": {
             "first_layer": "PreFilter",
             "security": "SCM",
