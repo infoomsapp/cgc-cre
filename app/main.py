@@ -399,15 +399,71 @@ async def pod_concurrency_diag(n: int = 5) -> Dict[str, Any]:
             b.block_hash = app.pod._compute_block_hash(b, prev_hash)
             return b
 
+        # Bypasses seal_block_atomic's own internal try/except entirely --
+        # that swallows the real exception before it ever reaches this
+        # diagnostic's caller, so this reimplements its critical section
+        # inline, letting the real exception propagate to OUR try/except.
+        from app.modules.pod.pod_repository import get_connection, _ledger_uid
+        from datetime import datetime as _dt2
+
+        def _ts(iso_str):
+            return _dt2.fromisoformat(iso_str) if iso_str else None
+
+        GENESIS = "0" * 64
         try:
-            block = await app.pod._repo.seal_block_atomic(
-                triplet=triplet,
-                governance_outcome="APPROVE",
-                compliance_score=None,
-                block_factory=block_factory
-            )
-            if block is None:
-                return {"i": i, "ok": False, "error": "seal_block_atomic returned None (caught internally)"}
+            async with get_connection(triplet.tenant_id) as conn:
+                if conn is None:
+                    return {"i": i, "ok": False, "error": "get_connection returned None (pool unavailable)"}
+                async with conn.transaction():
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", _ledger_uid(triplet.tenant_id))
+                    row = await conn.fetchrow(
+                        """
+                        SELECT COALESCE(MAX(block_number), -1) + 1 AS next_num,
+                               (SELECT block_hash FROM cgc_pod.pod_ledger
+                                 WHERE tenant_id = $1 ORDER BY block_number DESC LIMIT 1) AS last_hash
+                        FROM   cgc_pod.pod_ledger WHERE tenant_id = $1
+                        """,
+                        _ledger_uid(triplet.tenant_id)
+                    )
+                    next_number = int(row["next_num"]) if row and row["next_num"] is not None else 0
+                    prev_hash = row["last_hash"] if row and row["last_hash"] else GENESIS
+                    block = block_factory(next_number, prev_hash)
+                    await conn.execute(
+                        """
+                        INSERT INTO cgc_pod.inference_intercepts (
+                            intercept_id, decision_id, tenant_id,
+                            input_payload_hash, model_identifier, output_payload_hash,
+                            intercepted_at, delivery_at, latency_ms,
+                            triplet_hash, triplet_signature, signing_key_id,
+                            timestamp_token, timestamp_authority,
+                            pii_detected, pii_fields_count
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7::TIMESTAMPTZ,$8::TIMESTAMPTZ,$9,$10,$11,$12,$13,$14,$15,$16)
+                        ON CONFLICT (intercept_id) DO NOTHING
+                        """,
+                        triplet.intercept_id, triplet.decision_id, triplet.tenant_id,
+                        triplet.input_payload_hash, triplet.model_identifier, triplet.output_payload_hash,
+                        _ts(triplet.intercepted_at), _ts(triplet.delivered_at), triplet.latency_ms,
+                        triplet.triplet_hash, triplet.triplet_signature, triplet.signing_key_id,
+                        triplet.timestamp_token, triplet.timestamp_authority,
+                        triplet.pii_detected, triplet.pii_fields_count
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO cgc_pod.pod_ledger (
+                            block_uuid, tenant_id, intercept_id, decision_id,
+                            block_number, previous_block_hash, block_hash,
+                            triplet_hash, governance_outcome, compliance_score,
+                            chain_height, sealed_at, sealed_by, tamper_detected
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::TIMESTAMPTZ,$13,FALSE)
+                        ON CONFLICT (block_hash) DO NOTHING
+                        """,
+                        block.block_uuid, _ledger_uid(block.tenant_id),
+                        block.intercept_id, _ledger_uid(block.decision_id),
+                        block.block_number, block.previous_block_hash,
+                        block.block_hash, block.triplet_hash,
+                        block.governance_outcome, block.compliance_score,
+                        block.block_number, _ts(block.sealed_at), block.sealed_by
+                    )
             return {"i": i, "ok": True, "block_number": block.block_number}
         except Exception as e:
             return {"i": i, "ok": False, "error": f"{type(e).__name__}: {e}"}
