@@ -28,7 +28,7 @@ class SharePointConnector:
         self.client_id = client_id
         self.client_secret = client_secret
         self.auth_token = self._get_token()
-        self.scm = SCMModule()  # CGC SCM para firmas
+        self.scm = SCM()  # CGC SCM para firmas
 
     def _get_token(self) -> Optional[str]:
         """OAuth 2.0 Client Credentials Flow"""

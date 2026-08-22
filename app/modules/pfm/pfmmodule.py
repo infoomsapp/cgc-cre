@@ -334,15 +334,23 @@ class PFM:
     # ========================================================================
 
     def _get_risk_model(self, area: str, action: str) -> Dict[str, Any]:
-        """Retrieve risk model for area + action combination."""
-        area_models = self._db_loader.get_pfm(area, self.risk_models["DEFAULT"])
-        
-        # Try exact action match
-        if action in area_models:
-            return area_models[action]
-        
-        # Fallback to generic
-        return area_models.get("generic_action", self.risk_models["DEFAULT"]["generic_action"])
+        """
+        Retrieve risk model for area + action combination.
+
+        Used to pass self.risk_models["DEFAULT"] (a dict) as get_pfm's
+        `action` argument instead of the real `action` string -- the SQL
+        bind failed silently (caught by CGCDBLoader's own broad except),
+        and even the fallback shape could never satisfy the `action in
+        area_models` check below, since get_pfm already returns a FLAT
+        per-area/action model (baseline_risk/sensitivity_multiplier/etc.),
+        never a dict keyed by action name. Net effect: this always fell
+        through to the same static generic default on every real call,
+        regardless of area or action -- get_pfm() already does the full
+        area+action resolution (including its own DB/fallback branching)
+        and returns the model directly, so there's nothing left for this
+        method to do beyond passing the real arguments through.
+        """
+        return self._db_loader.get_pfm(area, action)
 
     def _assess_critical_factors(
         self,
