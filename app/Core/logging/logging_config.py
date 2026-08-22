@@ -37,7 +37,13 @@ class CGCLoggingHandler(logging.Handler):
                 "action": record.levelname,
                 "message": record.getMessage(),
                 "module": record.name,
-                "decision_id": extra.get("decision_id", "N/A"),
+                # None (not "N/A"): cgc_audit_traces.decision_id is a
+                # nullable FK to cgc_prefilter_results(decision_id) --
+                # Postgres skips FK validation on a real NULL, but "N/A"
+                # is a real (non-existent) value, so every log line
+                # without a decision_id used to violate the FK, silently
+                # swallowed by this method's own broad except below.
+                "decision_id": extra.get("decision_id"),
                 "user_id": extra.get("user_id", None),
                 "severity": record.levelname,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
