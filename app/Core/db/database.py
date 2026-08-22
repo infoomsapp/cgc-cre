@@ -1377,9 +1377,14 @@ class Database:
             return {}
 
     def _write_json(self, filename: str, data: Dict[str, Any]):
+        """Same fix as _write_json_list -- see that method's docstring."""
         filepath = os.path.join(self.data_dir, filename)
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"JSON fallback write failed for {filename} (non-fatal, read-only filesystem?): {e}")
 
     def _read_json_list(self, filename: str) -> List[Dict[str, Any]]:
         filepath = os.path.join(self.data_dir, filename)
@@ -1391,9 +1396,33 @@ class Database:
             return []
 
     def _write_json_list(self, filename: str, data: List[Dict[str, Any]]):
+        """
+        JSON-fallback write (dev-only path, self.use_postgres is False).
+
+        Was completely unguarded, unlike _read_json_list's own bare
+        `except: return []` -- a real, previously invisible crash: any
+        warm instance whose Postgres connection ever failed at cold start
+        (self.use_postgres decided once in __init__, never retried) falls
+        back to this method, and on Vercel's read-only filesystem outside
+        /tmp, `open(filepath, 'w')` raises `[Errno 2] No such file or
+        directory` on every single write for that instance's remaining
+        lifetime -- since callers like save_prefilter_result() have no
+        try/except of their own, this used to propagate as an unformatted
+        crash (masked before today's /governance/decision error-boundary
+        fix; likely the real, pre-existing cause behind at least some of
+        the opaque 500s seen during this session's PoD incident). Retries
+        the directory creation on every call (cheap, idempotent) and
+        degrades to a logged warning rather than raising -- the JSON
+        fallback was already a best-effort dev convenience, never a
+        durability guarantee.
+        """
         filepath = os.path.join(self.data_dir, filename)
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"JSON fallback write failed for {filename} (non-fatal, read-only filesystem?): {e}")
 
     def close(self):
         """Close database connections."""
