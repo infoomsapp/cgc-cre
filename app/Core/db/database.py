@@ -471,6 +471,221 @@ class Database:
                       "sha256", "rsa_pss_2048", 5, 2,
                       "Fallback default policy (seeded from code fallback)"))
 
+                # Real per-industry calibration -- previously only DEFAULT
+                # existed anywhere, and area itself couldn't even be
+                # selected on a real request until this same pass (see
+                # app/main.py's new `area` Form field + PreFilter.py's new
+                # HEALTHCARE area). Each area's numbers are a REASONABLE
+                # STARTING DRAFT anchored to one real, named regulatory
+                # framework per table (noted in that area's `description`
+                # field below) -- NOT a substitute for real compliance/
+                # actuarial review before relying on this with real
+                # clients. Same idempotent ON CONFLICT DO NOTHING seeding
+                # pattern as DEFAULT above; pure data, no DDL, so none of
+                # the schema-hardening concerns elsewhere in this method
+                # apply here.
+                AREA_CALIBRATION = {
+                    "BANKING": {
+                        "ecm": (
+                            {"transparency": 0.85, "fairness": 0.90, "accountability": 0.97,
+                             "privacy": 0.92, "security": 0.97, "compliance": 0.98,
+                             "sustainability": 0.75, "human_oversight": 0.93},
+                            {"LOW": {"multiplier": 1.0, "threshold": 0.85},
+                             "MEDIUM": {"multiplier": 0.95, "threshold": 0.90},
+                             "HIGH": {"multiplier": 0.90, "threshold": 0.95}},
+                            0.03, ["compliance", "security", "accountability"],
+                            "Basel III / GLBA-anchored draft -- needs real compliance review"
+                        ),
+                        "pfm": (40, 1.4, [], 0.80, []),
+                        "sda": (["kyc_verification", "transaction_audit_trail", "source_of_funds"],
+                                {"completeness": 0.95, "accuracy": 0.98},
+                                ["dual_control", "transaction_monitoring"],
+                                ["compliance", "security", "accuracy"]),
+                        "pan": (["account", "routing", "swift", "iban", "wire_transfer", "kyc"], {}, 1.3),
+                        "tco": (2555, True, True, False, "HIGH",
+                                "Basel III / BSA-anchored draft (~7yr) -- needs real compliance review"),
+                        "scm": (True, True, True, 60, True, True,
+                                "sha256", "rsa_pss_2048", 3, 7,
+                                "PCI-DSS / GLBA-anchored draft -- needs real compliance review"),
+                    },
+                    "LEGAL": {
+                        "ecm": (
+                            {"transparency": 0.80, "fairness": 0.88, "accountability": 0.93,
+                             "privacy": 0.95, "security": 0.93, "compliance": 0.90,
+                             "sustainability": 0.75, "human_oversight": 0.95},
+                            {"LOW": {"multiplier": 1.0, "threshold": 0.82},
+                             "MEDIUM": {"multiplier": 0.96, "threshold": 0.88},
+                             "HIGH": {"multiplier": 0.92, "threshold": 0.93}},
+                            0.03, ["privacy", "accountability", "human_oversight"],
+                            "ABA Model Rules (attorney-client privilege)-anchored draft -- needs real compliance review"
+                        ),
+                        "pfm": (30, 1.25, [], 0.82, []),
+                        "sda": (["privilege_review", "conflict_check"],
+                                {"completeness": 0.95},
+                                ["privilege_log", "redaction_review"],
+                                ["privacy", "compliance"]),
+                        "pan": (["contract", "litigation", "privileged", "attorney_client", "confidential"], {}, 1.35),
+                        "tco": (2190, True, True, False, "HIGH",
+                                "ABA/malpractice-statute-anchored draft (~6yr) -- needs real compliance review"),
+                        "scm": (True, True, True, 90, True, False,
+                                "sha256", "rsa_pss_2048", 4, 6,
+                                "ABA Model Rules-anchored draft -- needs real compliance review"),
+                    },
+                    "RETAIL": {
+                        "ecm": (
+                            {"transparency": 0.90, "fairness": 0.90, "accountability": 0.88,
+                             "privacy": 0.88, "security": 0.90, "compliance": 0.85,
+                             "sustainability": 0.85, "human_oversight": 0.85},
+                            {"LOW": {"multiplier": 1.0, "threshold": 0.78},
+                             "MEDIUM": {"multiplier": 0.97, "threshold": 0.83},
+                             "HIGH": {"multiplier": 0.94, "threshold": 0.88}},
+                            0.02, ["privacy", "fairness"],
+                            "PCI-DSS / CCPA-anchored draft -- needs real compliance review"
+                        ),
+                        "pfm": (20, 1.1, [], 0.87, []),
+                        "sda": (["consent_verification"],
+                                {"completeness": 0.90},
+                                ["pci_scope_minimization"],
+                                ["privacy", "customer_experience"]),
+                        "pan": (["payment_card", "purchase", "loyalty", "customer_pii"], {}, 1.15),
+                        "tco": (1095, True, False, False, "MEDIUM",
+                                "PCI-DSS / CCPA-anchored draft (~3yr) -- needs real compliance review"),
+                        "scm": (True, True, False, 90, True, False,
+                                "sha256", "rsa_pss_2048", 5, 3,
+                                "PCI-DSS / CCPA-anchored draft -- needs real compliance review"),
+                    },
+                    "AUDIT": {
+                        "ecm": (
+                            {"transparency": 0.95, "fairness": 0.90, "accountability": 0.98,
+                             "privacy": 0.85, "security": 0.92, "compliance": 0.97,
+                             "sustainability": 0.75, "human_oversight": 0.95},
+                            {"LOW": {"multiplier": 1.0, "threshold": 0.85},
+                             "MEDIUM": {"multiplier": 0.96, "threshold": 0.90},
+                             "HIGH": {"multiplier": 0.92, "threshold": 0.95}},
+                            0.04, ["accountability", "transparency", "compliance"],
+                            "SOX / PCAOB-anchored draft -- needs real compliance review"
+                        ),
+                        "pfm": (35, 1.3, [], 0.83, []),
+                        "sda": (["audit_trail_completeness", "segregation_of_duties_evidence"],
+                                {"completeness": 0.98, "accuracy": 0.98},
+                                ["independent_review"],
+                                ["accountability", "compliance"]),
+                        "pan": (["audit_log", "internal_control", "material_weakness", "sox"], {}, 1.25),
+                        "tco": (2555, True, True, True, "HIGH",
+                                "SOX Section 802-anchored draft (~7yr) -- needs real compliance review"),
+                        "scm": (True, True, False, 60, True, True,
+                                "sha256", "rsa_pss_2048", 4, 7,
+                                "SOX Section 802-anchored draft -- needs real compliance review"),
+                    },
+                    "FINANCE": {
+                        "ecm": (
+                            {"transparency": 0.90, "fairness": 0.90, "accountability": 0.95,
+                             "privacy": 0.88, "security": 0.93, "compliance": 0.96,
+                             "sustainability": 0.78, "human_oversight": 0.90},
+                            {"LOW": {"multiplier": 1.0, "threshold": 0.83},
+                             "MEDIUM": {"multiplier": 0.96, "threshold": 0.89},
+                             "HIGH": {"multiplier": 0.92, "threshold": 0.94}},
+                            0.03, ["compliance", "accountability", "transparency"],
+                            "SEC / FINRA-anchored draft -- needs real compliance review"
+                        ),
+                        "pfm": (38, 1.35, [], 0.81, []),
+                        "sda": (["material_nonpublic_info_screening", "best_execution_evidence"],
+                                {"completeness": 0.95},
+                                ["insider_trading_controls"],
+                                ["compliance", "accuracy"]),
+                        "pan": (["trading", "portfolio", "material_nonpublic", "insider", "securities"], {}, 1.3),
+                        "tco": (2555, True, True, False, "HIGH",
+                                "SEC Rule 17a-4-anchored draft (~7yr) -- needs real compliance review"),
+                        "scm": (True, True, False, 60, True, True,
+                                "sha256", "rsa_pss_2048", 4, 7,
+                                "SEC Rule 17a-4-anchored draft -- needs real compliance review"),
+                    },
+                    "HEALTHCARE": {
+                        "ecm": (
+                            {"transparency": 0.85, "fairness": 0.90, "accountability": 0.95,
+                             "privacy": 0.98, "security": 0.96, "compliance": 0.95,
+                             "sustainability": 0.75, "human_oversight": 0.93},
+                            {"LOW": {"multiplier": 1.0, "threshold": 0.85},
+                             "MEDIUM": {"multiplier": 0.95, "threshold": 0.90},
+                             "HIGH": {"multiplier": 0.90, "threshold": 0.95}},
+                            0.03, ["privacy", "security", "compliance"],
+                            "HIPAA-anchored draft -- needs real compliance review"
+                        ),
+                        "pfm": (42, 1.45, [], 0.80, []),
+                        "sda": (["phi_minimum_necessary", "consent_verification"],
+                                {"completeness": 0.96, "accuracy": 0.97},
+                                ["access_controls", "breach_notification_readiness"],
+                                ["privacy", "security"]),
+                        "pan": (["diagnosis", "prescription", "phi", "medical_record", "insurance_claim"], {}, 1.4),
+                        "tco": (2190, True, True, False, "HIGH",
+                                "HIPAA-anchored draft (~6yr) -- needs real compliance review"),
+                        "scm": (True, True, True, 60, True, True,
+                                "sha256", "rsa_pss_2048", 2, 6,
+                                "HIPAA-anchored draft -- needs real compliance review"),
+                    },
+                }
+
+                for area_name, tables in AREA_CALIBRATION.items():
+                    frameworks, modulation, owner_bonus, critical, ecm_desc = tables["ecm"]
+                    cur.execute("""
+                        INSERT INTO cgc_jla.ecm_calibration
+                            (governance_area, base_frameworks, sensitivity_modulation,
+                             compliance_owner_bonus, critical_frameworks, description)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (governance_area) DO NOTHING
+                    """, (area_name, Json(frameworks), Json(modulation), owner_bonus, Json(critical), ecm_desc))
+
+                    baseline_risk, sens_mult, crit_factors, succ_prob, fail_modes = tables["pfm"]
+                    cur.execute("""
+                        INSERT INTO cgc_jla.pfm_risk_models
+                            (governance_area, action_type, baseline_risk, sensitivity_multiplier,
+                             critical_factors, success_probability_baseline, failure_modes)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (governance_area, action_type) DO NOTHING
+                    """, (area_name, "default_action", baseline_risk, sens_mult,
+                          Json(crit_factors), succ_prob, Json(fail_modes)))
+
+                    data_reqs, quality, mitigations, priorities = tables["sda"]
+                    cur.execute("""
+                        INSERT INTO cgc_jla.sda_best_practices
+                            (governance_area, data_requirements, quality_factors,
+                             risk_mitigations, optimization_priorities)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (governance_area) DO NOTHING
+                    """, (area_name, Json(data_reqs), Json(quality), Json(mitigations), Json(priorities)))
+
+                    keywords, patterns, pan_mult = tables["pan"]
+                    cur.execute("""
+                        INSERT INTO cgc_jla.pan_domain_patterns
+                            (governance_area, keywords, patterns, sensitivity_multiplier)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (governance_area) DO NOTHING
+                    """, (area_name, Json(keywords), Json(patterns), pan_mult))
+
+                    ret_days, compression, archival, blockchain, tamper_level, tco_desc = tables["tco"]
+                    cur.execute("""
+                        INSERT INTO cgc_jla.tco_retention_policies
+                            (governance_area, retention_days, compression_enabled,
+                             archival_required, blockchain_sync, tamper_detection_level, description)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (governance_area) DO NOTHING
+                    """, (area_name, ret_days, compression, archival, blockchain, tamper_level, tco_desc))
+
+                    (encrypt_req, sign_req, fingerprint_req, rotation_days, audit_log_req,
+                     chain_strict, hash_algo, sign_algo, double_enc_threshold,
+                     audit_ret_years, scm_desc) = tables["scm"]
+                    cur.execute("""
+                        INSERT INTO cgc_jla.scm_security_policies
+                            (governance_area, encryption_required, signing_required,
+                             fingerprint_required, min_key_rotation_days, audit_log_required,
+                             chain_validation_strict, hash_algorithm, signing_algorithm,
+                             double_encryption_threshold, audit_retention_years, description)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (governance_area) DO NOTHING
+                    """, (area_name, encrypt_req, sign_req, fingerprint_req, rotation_days,
+                          audit_log_req, chain_strict, hash_algo, sign_algo,
+                          double_enc_threshold, audit_ret_years, scm_desc))
+
                 sensitivity_rows = [
                     ("LOW",    False, True,  False, 24, False),
                     ("MEDIUM", False, False, True,  12, False),
