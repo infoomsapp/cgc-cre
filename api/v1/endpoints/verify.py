@@ -20,6 +20,14 @@ from app.modules.tco.tcomodule import TCO
 
 router = APIRouter()
 
+# Module-level singleton, constructed once at import time and reused across
+# every request -- this endpoint is deliberately unauthenticated (see below),
+# so it's exposed to more casual/higher-volume traffic than the authenticated
+# routes, and used to instantiate a brand-new TCO() (re-copying retention
+# policy dicts etc.) on every single call for no reason. Same lazy-singleton
+# shape as get_pod_repository() just below.
+_tco = TCO()
+
 
 @router.get(
     "/{decision_id}",
@@ -61,7 +69,7 @@ async def verify_decision(
     # this public, unauthenticated-by-design endpoint can't be used to
     # read another tenant's governance record just by guessing a
     # decision_id and claiming a different x_tenant_id.
-    tco_result = TCO().get_decision_audit(decision_id)
+    tco_result = _tco.get_decision_audit(decision_id)
     tco_entry = None
     if tco_result.get("found") and tco_result["audit_entry"].get("tenant_id") == x_tenant_id:
         tco_entry = tco_result["audit_entry"]

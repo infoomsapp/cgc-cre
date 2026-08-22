@@ -23,6 +23,15 @@ def check_rate_limit(key: str, max_count: int, window_seconds: int) -> bool:
     """
     Returns True if the call is allowed (and records it), False if `key`
     has hit `max_count` events within the trailing `window_seconds`.
+
+    The count-then-insert below is guarded by a per-key
+    pg_advisory_xact_lock -- same shape already proven for PoD's block
+    sequencing and TCO's audit-chain sequencing (both found, live, to have
+    the exact same race under genuine concurrency: N simultaneous callers
+    all read the same count before any of their inserts land, letting more
+    than max_count through in one window). Locks only serialize callers
+    sharing the same key (e.g. the same org_id or IP hammering
+    /governance/decision at once) -- different keys stay fully parallel.
     """
     db = get_database()
     since = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
@@ -32,6 +41,8 @@ def check_rate_limit(key: str, max_count: int, window_seconds: int) -> bool:
             if conn is None:
                 return True
             cur = conn.cursor()
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+
             cur.execute(
                 "SELECT COUNT(*) AS c FROM cgc_guard.rate_limit_events WHERE key = %s AND created_at >= %s",
                 (key, since)
