@@ -173,7 +173,8 @@ async def run_cgc_prefilter(
     user_email: str,
     action: str,
     data_domains: List[str],
-    user: Dict[str, Any]
+    user: Dict[str, Any],
+    area: str = "DEFAULT"
 ) -> Any:
     """Ejecutar CGC-PreFilter."""
 
@@ -213,6 +214,7 @@ async def run_cgc_prefilter(
         action=action,
         data_domains=data_domains,
         requested_scopes=[],
+        area=area,
         correlation_id=f"corr_{secrets.token_hex(8)}"
     )
 
@@ -417,6 +419,7 @@ async def execute_governance_decision(
     user_email: str = Form(...),
     data_domains: str = Form(...),
     app_source: str = Form("unknown"),
+    area: str = Form("DEFAULT"),
     user=Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Unified endpoint for executing governance decisions."""
@@ -503,7 +506,8 @@ async def execute_governance_decision(
             user_email=user_email,
             action=action,
             data_domains=domains_list,
-            user=user
+            user=user,
+            area=area
         )
 
         if prefilter_result.outcome != "ALLOW":

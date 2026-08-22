@@ -47,6 +47,7 @@ class GovernanceArea(Enum):
     RETAIL = "RETAIL"
     AUDIT = "AUDIT"
     FINANCE = "FINANCE"
+    HEALTHCARE = "HEALTHCARE"
     DEFAULT = "DEFAULT"
 
 
@@ -189,6 +190,10 @@ AREA_DATA_MAPPINGS = {
     },
     "FINANCE": {
         "sensitive_domains": ["INVESTMENT_DATA", "TRADING_DATA", "PORTFOLIO", "RISK_METRICS"],
+        "blocked_domains": [],
+    },
+    "HEALTHCARE": {
+        "sensitive_domains": ["PHI", "MEDICAL_RECORDS", "DIAGNOSIS_DATA", "PRESCRIPTION_DATA", "INSURANCE_CLAIMS"],
         "blocked_domains": [],
     },
     "DEFAULT": {
