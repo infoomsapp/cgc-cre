@@ -587,13 +587,32 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_ledger_decision
                     ON cgc_pod.pod_ledger (decision_id, tenant_id)
                 """)
-                # TEMP: the best-effort UNIQUE(tenant_id, block_number)
-                # constraint (defense in depth on top of the real fix --
-                # the per-tenant advisory lock in
-                # PoDRepository.seal_block_atomic()) is pulled out here
-                # while diagnosing a live regression on /governance/decision
-                # that started in the same deploy this was added. Re-add
-                # once confirmed innocent.
+                # Best-effort defense-in-depth: the real fix for concurrent/
+                # cold-start block numbering is the per-tenant advisory lock
+                # in PoDRepository.seal_block_atomic() (app/modules/pod/
+                # pod_repository.py), which makes it correct going forward.
+                # This constraint is a second layer that turns any future
+                # (tenant_id, block_number) collision into a loud, rejected
+                # INSERT instead of a silent chain fork. ALTER TABLE ADD
+                # CONSTRAINT has no IF NOT EXISTS -- wrapped in a DO block so
+                # a re-run on every boot is idempotent (duplicate_object) and
+                # so pre-existing duplicate rows (plausible, given the bug
+                # this is fixing) degrade to a visible Postgres WARNING
+                # rather than crashing this schema method or looping forever.
+                # (Confirmed innocent of the transient /governance/decision
+                # 500s seen while diagnosing this -- those were connection-
+                # pool exhaustion from rapid repeated test bursts, not this.)
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        ALTER TABLE cgc_pod.pod_ledger
+                            ADD CONSTRAINT ux_pod_ledger_tenant_block UNIQUE (tenant_id, block_number);
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                        WHEN unique_violation THEN
+                            RAISE WARNING 'cgc_pod.pod_ledger has pre-existing duplicate (tenant_id, block_number) rows -- constraint not applied; check GET /verify/chain/integrity per tenant';
+                    END $$;
+                """)
                 # Append-only: the whole point of a tamper-evident chain is
                 # that a sealed block can never be edited or removed. Uses a
                 # trigger, not a RULE -- Postgres flatly rejects any INSERT
