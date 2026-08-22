@@ -487,51 +487,70 @@ async def execute_governance_decision(
         except Exception as e:
             logger.warning(f"[PoD] begin_intercept failed (non-fatal): {e}")
 
-    prefilter_result = await run_cgc_prefilter(
-        org_id=org_id,
-        user_email=user_email,
-        action=action,
-        data_domains=domains_list,
-        user=user
-    )
-
-    if prefilter_result.outcome != "ALLOW":
-        response = {
-            "approved": False,
-            "stage": "prefilter",
-            "outcome": prefilter_result.outcome,
-            "reason": prefilter_result.reason,
-            "correlation_id": prefilter_result.correlation_id,
-            "decision_id": decision_id
-        }
-    else:
-        # Full governance cycle: ECM/PFM/PAN/SDA scoring + aggregation,
-        # ComplianceEngine (EU AI Act), TCO audit log -- app.cgc_loop
-        # already implements all of this (execute_governance_cycle) but
-        # was never called from here; the endpoint used to stop after
-        # PreFilter alone. Sync call, no await -- same pattern as
-        # app.prefilter.evaluate() above.
-        loop_result = app.cgc_loop.execute_governance_cycle(
-            decision_id=decision_id,
-            module_source=user_email,
+    # Safety net: neither run_cgc_prefilter() nor execute_governance_cycle()
+    # used to have any guard around this call site -- unlike every PoD call
+    # in this same handler, which is triple-wrapped. cgc_loop.py's own
+    # internal try/except only starts AFTER its tenant-quota check block
+    # (check_quota/check_feature, and the quota-exceeded branch's own
+    # tco.log_decision call), so any exception in that narrow pre-try
+    # window -- or in run_cgc_prefilter itself -- used to propagate fully
+    # unguarded straight to Starlette's default handler: a raw, unformatted
+    # 500 with no detail body, exactly what made a real incident hard to
+    # diagnose. This converts that into a normal, diagnosable HTTPException.
+    try:
+        prefilter_result = await run_cgc_prefilter(
             org_id=org_id,
+            user_email=user_email,
             action=action,
-            input_data=input_dict,
-            prefilter_result=prefilter_result,
-            context=None,
-            app_source=app_source,
+            data_domains=domains_list,
+            user=user
         )
-        total_latency = (perf_counter_ns() - start_time) / 1_000_000
-        response = {
-            "approved": loop_result.get("approved", False),
-            "outcome": loop_result.get("outcome"),
-            "reason": loop_result.get("reason"),
-            "correlation_id": prefilter_result.correlation_id,
-            "prefilter": prefilter_result.to_dict(),
-            "decision": loop_result,
-            "total_latency_ms": round(total_latency, 2),
-            "decision_id": decision_id
-        }
+
+        if prefilter_result.outcome != "ALLOW":
+            response = {
+                "approved": False,
+                "stage": "prefilter",
+                "outcome": prefilter_result.outcome,
+                "reason": prefilter_result.reason,
+                "correlation_id": prefilter_result.correlation_id,
+                "decision_id": decision_id
+            }
+        else:
+            # Full governance cycle: ECM/PFM/PAN/SDA scoring + aggregation,
+            # ComplianceEngine (EU AI Act), TCO audit log -- app.cgc_loop
+            # already implements all of this (execute_governance_cycle) but
+            # was never called from here; the endpoint used to stop after
+            # PreFilter alone. Sync call, no await -- same pattern as
+            # app.prefilter.evaluate() above.
+            loop_result = app.cgc_loop.execute_governance_cycle(
+                decision_id=decision_id,
+                module_source=user_email,
+                org_id=org_id,
+                action=action,
+                input_data=input_dict,
+                prefilter_result=prefilter_result,
+                context=None,
+                app_source=app_source,
+            )
+            total_latency = (perf_counter_ns() - start_time) / 1_000_000
+            response = {
+                "approved": loop_result.get("approved", False),
+                "outcome": loop_result.get("outcome"),
+                "reason": loop_result.get("reason"),
+                "correlation_id": prefilter_result.correlation_id,
+                "prefilter": prefilter_result.to_dict(),
+                "decision": loop_result,
+                "total_latency_ms": round(total_latency, 2),
+                "decision_id": decision_id
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[governance/decision] unhandled failure: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "governance_cycle_failed", "message": str(e), "decision_id": decision_id}
+        )
 
     if app.pod and intercept_id:
         try:
