@@ -346,6 +346,76 @@ async def trace_execution(request: Request, call_next: Any) -> Any:
     return response
 
 # =========================
+# TEMP DIAGNOSTIC — remove after diagnosing the concurrent-seal failure
+# =========================
+@app.get("/pod/concurrency-diag", tags=["System"], dependencies=[Depends(get_current_user)])
+async def pod_concurrency_diag(n: int = 5) -> Dict[str, Any]:
+    import asyncio
+    import uuid as _uuid
+    from app.modules.pod.pod_interceptor_v2 import InterceptTriplet, PoDBlock
+    from datetime import datetime as _dt, timezone as _tz
+
+    if app.pod is None or app.pod._repo is None:
+        return {"error": "pod or repo not available"}
+
+    tenant_id = "cgc-concurrency-diag-tenant"
+
+    async def one_seal(i: int) -> Dict[str, Any]:
+        now = _dt.now(_tz.utc).isoformat()
+        triplet = InterceptTriplet(
+            intercept_id=str(_uuid.uuid4()),
+            decision_id=f"diag-decision-{i}",
+            tenant_id=tenant_id,
+            input_payload_hash="a" * 64,
+            model_identifier="diag/concurrency/v1",
+            output_payload_hash="b" * 64,
+            triplet_hash="c" * 64,
+            triplet_signature="d" * 32,
+            signing_key_id="diag-key",
+            intercepted_at=now,
+            delivered_at=now,
+            latency_ms=1.0,
+            timestamp_token=None,
+            timestamp_authority=None,
+            pii_detected=False,
+            pii_fields_count=0,
+        )
+
+        def block_factory(next_number: int, prev_hash: str) -> PoDBlock:
+            b = PoDBlock(
+                block_uuid=str(_uuid.uuid4()),
+                tenant_id=triplet.tenant_id,
+                intercept_id=triplet.intercept_id,
+                decision_id=triplet.decision_id,
+                block_number=next_number,
+                previous_block_hash=prev_hash,
+                block_hash="",
+                triplet_hash=triplet.triplet_hash,
+                governance_outcome="APPROVE",
+                compliance_score=None,
+                sealed_at=_dt.now(_tz.utc).isoformat(),
+                sealed_by="diag"
+            )
+            b.block_hash = app.pod._compute_block_hash(b, prev_hash)
+            return b
+
+        try:
+            block = await app.pod._repo.seal_block_atomic(
+                triplet=triplet,
+                governance_outcome="APPROVE",
+                compliance_score=None,
+                block_factory=block_factory
+            )
+            if block is None:
+                return {"i": i, "ok": False, "error": "seal_block_atomic returned None (caught internally)"}
+            return {"i": i, "ok": True, "block_number": block.block_number}
+        except Exception as e:
+            return {"i": i, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    results = await asyncio.gather(*[one_seal(i) for i in range(n)])
+    return {"tenant_id": tenant_id, "n": n, "results": results}
+
+# =========================
 # HEALTH + GOVERNANCE
 # =========================
 @app.get("/health", tags=["System"])
