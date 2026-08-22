@@ -809,6 +809,27 @@ class Database:
                 # This constraint is a second layer that turns any future
                 # (tenant_id, block_number) collision into a loud, rejected
                 # INSERT instead of a silent chain fork.
+                #
+                # 2026-08-22 audit finding: on every single cold start where
+                # this constraint already exists, ADD CONSTRAINT doesn't
+                # raise duplicate_object (42710) here -- it raises
+                # duplicate_table (42P07, "relation ... already exists"),
+                # since the UNIQUE constraint's backing index shares the
+                # relation namespace with tables/indexes/sequences. That
+                # SQLSTATE wasn't caught, so it escaped this DO block,
+                # aborted the whole enclosing transaction, and skipped
+                # every statement after it in this method for that boot --
+                # the append-only trigger (immediately below) and
+                # chain_integrity_log's own CREATE TABLE IF NOT EXISTS never
+                # got a chance to re-verify themselves, logged every time as
+                # a scary-looking but actually-swallowed
+                # "cgc_pod schema provisioning failed" ERROR. Confirmed via
+                # the literal error text, which is PostgreSQL's fixed
+                # message template for 42P07, not 42710. Harmless today only
+                # because the trigger/table already exist from whichever
+                # boot last got far enough to create them -- if either were
+                # ever manually dropped, they'd never be recreated
+                # automatically until this was fixed.
                 cur.execute("""
                     DO $$
                     BEGIN
@@ -816,6 +837,7 @@ class Database:
                             ADD CONSTRAINT ux_pod_ledger_tenant_block UNIQUE (tenant_id, block_number);
                     EXCEPTION
                         WHEN duplicate_object THEN NULL;
+                        WHEN duplicate_table THEN NULL;
                         WHEN unique_violation THEN
                             RAISE WARNING 'cgc_pod.pod_ledger has pre-existing duplicate (tenant_id, block_number) rows -- constraint not applied; check GET /verify/chain/integrity per tenant';
                     END $$;
@@ -1085,6 +1107,59 @@ class Database:
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:
             logger.error(f"cgc_guard schema provisioning failed (non-fatal, guard checks will fail open until fixed): {e}")
+
+    # Default retention windows for the 4 cgc_guard.* telemetry tables --
+    # none of them ever had a cleanup mechanism at all, so they grow
+    # unboundedly forever (2026-08-22 audit finding #9). Deliberately NOT
+    # applied to cgc_tco.audit_trail or cgc_pod.* here, even though the
+    # audit flagged those too -- both are hash-chained ledgers where each
+    # row's hash commits to the previous row's hash, so a blind date-based
+    # DELETE would break chain-integrity verification for every row that
+    # comes after the deleted range. That needs an archival strategy (move
+    # old blocks out, keep the chain's own linkage provable), not a plain
+    # DELETE -- a separate, real design decision, not bundled in here.
+    # Overridable per table via env var since "how long is enough" is a
+    # product/compliance call, not something to hardcode confidently.
+    _GUARD_RETENTION_DEFAULTS = {
+        "rate_limit_events": ("CGC_GUARD_RATE_LIMIT_RETENTION_DAYS", 7),
+        "login_attempts": ("CGC_GUARD_LOGIN_ATTEMPTS_RETENTION_DAYS", 30),
+        "suspicious_payloads": ("CGC_GUARD_SUSPICIOUS_PAYLOADS_RETENTION_DAYS", 90),
+        "internal_flags": ("CGC_GUARD_INTERNAL_FLAGS_RETENTION_DAYS", 90),
+    }
+
+    def cleanup_guard_tables(self) -> Dict[str, Any]:
+        """
+        Deletes rows older than each table's retention window from the 4
+        cgc_guard.* telemetry tables. Meant to be called periodically by
+        whatever the user wires up (Vercel Cron hitting the admin endpoint
+        this backs, a GitHub Action, cron-job.com, ...) -- this process has
+        no scheduler of its own, it only provides the mechanism.
+
+        Returns per-table deleted counts, or {"error": ...} if unavailable
+        (JSON-fallback mode, or no DB connection) -- these tables don't
+        exist at all outside Postgres, so there's nothing to clean up in
+        JSON-fallback dev mode.
+        """
+        if not self.use_postgres:
+            return {"error": "cleanup only applies in PostgreSQL mode"}
+
+        results: Dict[str, Any] = {}
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                for table, (env_var, default_days) in self._GUARD_RETENTION_DEFAULTS.items():
+                    days = int(os.getenv(env_var, str(default_days)))
+                    cur.execute(
+                        f"DELETE FROM cgc_guard.{table} WHERE created_at < NOW() - (%s * INTERVAL '1 day')",
+                        (days,)
+                    )
+                    results[table] = {"deleted": cur.rowcount, "retention_days": days}
+                conn.commit()
+            logger.info(f"[cleanup] cgc_guard tables cleaned: {results}")
+            return results
+        except Exception as e:
+            logger.error(f"[cleanup] cgc_guard cleanup failed: {e}")
+            return {"error": str(e)}
 
     def _create_auth_schema(self):
         """
@@ -1612,7 +1687,13 @@ class Database:
                         WHERE created_at > %s
                         GROUP BY final_outcome
                     """, (cutoff,))
-                    return dict(cur.fetchall())
+                    # Was dict(cur.fetchall()) -- with RealDictCursor, fetchall()
+                    # returns a list of dict-like rows, not (key, value) pairs, so
+                    # dict() on it raises ValueError. No live caller ever hit this
+                    # (confirmed zero call sites repo-wide), so it never crashed
+                    # anything, but it was never actually callable either. Keyed
+                    # by final_outcome, same shape the GROUP BY implies.
+                    return {row["final_outcome"]: dict(row) for row in cur.fetchall()}
         else:
             return {"error": "Stats not available in JSON mode"}
 

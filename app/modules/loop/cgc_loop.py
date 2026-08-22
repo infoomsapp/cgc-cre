@@ -268,23 +268,51 @@ class LOOP:
     de gobernanza de manera unificada.
     """
     
-    def __init__(self, version: str = "4.0.1"):
-        """Initialize Loop Decision with module dependencies"""
+    def __init__(
+        self,
+        version: str = "4.0.1",
+        scm: Optional[Any] = None,
+        pan: Optional[Any] = None,
+        ecm: Optional[Any] = None,
+        pfm: Optional[Any] = None,
+        sda: Optional[Any] = None,
+        tco: Optional[Any] = None,
+    ):
+        """
+        Initialize Loop Decision with module dependencies.
+
+        Optionally accepts already-constructed module instances (main.py's
+        real wiring, since 2026-08-22) instead of always building its own.
+        Before this, LOOP built a completely separate set of
+        SCM/PAN/ECM/PFM/SDA/TCO instances from the ones main.py exposes as
+        app.scm/app.pan/.../app.tco -- every real /governance/decision call
+        ran against LOOP's private copies (updating THEIR internal
+        counters), while GET /governance/modules/{name}/metrics and
+        /status/nodes read app.*'s copies, which never processed a single
+        real decision. Those metrics endpoints showed zero/stale numbers
+        regardless of actual production traffic, permanently. Falls back to
+        building its own for any argument left as None, so LOOP() (bare --
+        this file's own __main__ test block, or any other direct caller)
+        behaves exactly as before.
+        """
         self.module_name = "CGC-Loop-Decision"
         self.version = version
-        
+
         # Module dependencies (con manejo de errores)
-        try:
-            self.scm = SCM() if SCM else None
-        except Exception as e:
-            logger.warning(f"SCM initialization failed: {e}, continuing without SCM")
-            self.scm = None
-        
-        self.pan = PAN() if PAN else None
-        self.ecm = ECM() if ECM else None
-        self.pfm = PFM() if PFM else None
-        self.sda = SDA() if SDA else None
-        self.tco = TCO() if TCO else None
+        if scm is not None:
+            self.scm = scm
+        else:
+            try:
+                self.scm = SCM() if SCM else None
+            except Exception as e:
+                logger.warning(f"SCM initialization failed: {e}, continuing without SCM")
+                self.scm = None
+
+        self.pan = pan if pan is not None else (PAN() if PAN else None)
+        self.ecm = ecm if ecm is not None else (ECM() if ECM else None)
+        self.pfm = pfm if pfm is not None else (PFM() if PFM else None)
+        self.sda = sda if sda is not None else (SDA() if SDA else None)
+        self.tco = tco if tco is not None else (TCO() if TCO else None)
         
         # ComplianceEngine (solo si SCM y TCO están disponibles)
         try:
@@ -389,7 +417,14 @@ class LOOP:
         # ================================================================
         # STEP 0.5: Tenant Quota Check
         # ================================================================
-        if not tenant_manager.check_quota(org_id, "decisions"):
+        # reserve_quota() checks AND consumes atomically (was check_quota()
+        # here + a separate check_quota(increment=1) at STEP 12, with the
+        # whole pipeline running between them -- a real race under
+        # concurrent decisions near the monthly limit; see reserve_quota()'s
+        # own docstring). Quota is now consumed the moment a decision is
+        # admitted here, not after STEP 12 completes -- STEP 12's old
+        # increment call is removed accordingly, not duplicated.
+        if not tenant_manager.reserve_quota(org_id, "decisions"):
             logger.warning(
                 f"Tenant {org_id} quota exceeded", 
                 extra={'org_id': org_id, 'decision_id': decision_id} 
@@ -648,7 +683,9 @@ class LOOP:
             # ================================================================
             # STEP 12: Update Metrics & Return
             # ================================================================
-            tenant_manager.check_quota(org_id, "decisions", increment=1)
+            # Quota was already atomically reserved at STEP 0.5
+            # (tenant_manager.reserve_quota) -- incrementing again here would
+            # double-count every decision.
             self._update_metrics(decision_outcome, overall_start)
             
             # Determinar cumplimiento EU AI Act

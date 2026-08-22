@@ -11,10 +11,12 @@ a cryptographic proof that cannot be created retroactively.
 OlympusMont Systems LLC © 2025
 """
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -259,7 +261,33 @@ class PoDInterceptor:
             except Exception as e:
                 logger.warning(f"[PoD] DB init failed ({e}) — in-memory fallback")
 
-        # Load or generate RSA signing key
+        # Load or generate RSA signing key.
+        #
+        # Unlike app/modules/scm/scmmodule.py's LocalKMSProvider (which reads
+        # CGC_SCM_RSA_PRIV_V1/CGC_SCM_RSA_PUB_V1 from the environment), this
+        # class had NO env-var fallback at all -- private_key_pem is a
+        # constructor param main.py's only call site
+        # (PoDInterceptor(signing_key_id="cgc-pod-v1")) never actually
+        # supplies, so the `else` branch below always ran: a brand-new RSA
+        # keypair, generated in memory, on every single cold start, never
+        # persisted anywhere. On Vercel that means every fresh instance --
+        # confirmed live via "[PoD] Using ephemeral RSA key" on every single
+        # boot -- which breaks PoD's whole non-repudiation premise: a
+        # triplet_signature signed by one instance can never be verified
+        # once that instance recycles, since the public key that could
+        # verify it was never stored anywhere. Same CGC_POD_RSA_PRIV_V1/
+        # CGC_POD_RSA_PUB_V1 base64-PEM env-var pattern as SCM's
+        # LocalKMSProvider, so the same key material generated once (either
+        # here or by hand) works for both if the user chooses to share one
+        # keypair, or two independent ones if kept separate.
+        if not private_key_pem:
+            priv_b64 = os.getenv("CGC_POD_RSA_PRIV_V1")
+            if priv_b64:
+                try:
+                    private_key_pem = base64.urlsafe_b64decode(priv_b64.encode())
+                except Exception as e:
+                    logger.warning(f"[PoD] Invalid CGC_POD_RSA_PRIV_V1, falling back to ephemeral: {e}")
+
         if private_key_pem:
             self._private_key = serialization.load_pem_private_key(
                 private_key_pem, password=None, backend=default_backend()
@@ -271,7 +299,21 @@ class PoDInterceptor:
                 key_size=2048,
                 backend=default_backend()
             )
-            logger.warning("[PoD] Using ephemeral RSA key — load persistent key in production")
+            priv_pem = self._private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            pub_pem = self._private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            logger.warning(
+                "[PoD] Using ephemeral RSA key — load persistent key in production. "
+                "Set CGC_POD_RSA_PRIV_V1 in .env (and on Vercel) to persist it:\n"
+                f"CGC_POD_RSA_PRIV_V1={base64.urlsafe_b64encode(priv_pem).decode()}\n"
+                f"CGC_POD_RSA_PUB_V1={base64.urlsafe_b64encode(pub_pem).decode()}"
+            )
 
         logger.info(f"[PoD] Interceptor initialized | Key: {signing_key_id} | TSA: {self.tsa_client.tsa_url}")
 

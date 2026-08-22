@@ -169,6 +169,10 @@ class TenantManager:
         records and returns True (fire-and-forget consumption); the actual
         gate is a call with increment=0, which compares the durable count
         against the plan's monthly limit.
+
+        Kept for any other caller that wants a plain read/record, but
+        cgc_loop.py's own gate no longer uses this -- see reserve_quota()
+        below for why.
         """
         plan = self._get_plan(org_id)
         limit = self.PLAN_QUOTAS.get(plan, self.PLAN_QUOTAS["STANDARD"]).get(resource, 50_000)
@@ -185,6 +189,73 @@ class TenantManager:
 
         current = self._get_usage(org_id, resource)
         return current < limit
+
+    def reserve_quota(self, org_id: str, resource: str) -> bool:
+        """
+        Atomic check-and-consume: replaces cgc_loop.py's old two-step
+        pattern of check_quota(org_id, resource) as a gate at the START of
+        execute_governance_cycle, then a separate check_quota(..., increment=1)
+        call at the very END, with the entire PAN/ECM/PFM/SDA/compliance/TCO
+        pipeline running in between on two completely separate DB
+        connections. Under real concurrent decisions for the same tenant
+        near its monthly limit, every one of them could read the same
+        under-limit count at the gate before any of their increments
+        landed at the end -- the same TOCTOU shape already found and fixed
+        (with a pg_advisory_xact_lock) for PoD's block sequencing, TCO's
+        audit-chain sequencing, and the rate limiter. This closes it by
+        doing the read and the write in one locked transaction, right at
+        the gate -- consuming quota the moment a decision is admitted,
+        not after it finishes. Locks on (org_id, resource) so unrelated
+        tenants/resources stay fully parallel.
+
+        Behavior change accepted by the user (2026-08-22 audit mitigation
+        pass): a decision that later crashes mid-pipeline now consumes
+        quota (it was admitted and did real governance-module work), where
+        before it silently didn't -- matching the existing behavior for
+        REJECTed decisions, which already consumed quota under the old
+        two-step pattern too.
+
+        Returns True (and consumes one unit) if the tenant has room;
+        False (consumes nothing) if already at/over the limit.
+        """
+        plan = self._get_plan(org_id)
+        limit = self.PLAN_QUOTAS.get(plan, self.PLAN_QUOTAS["STANDARD"]).get(resource, 50_000)
+
+        if limit == -1:
+            self._increment_usage(org_id, resource, 1)
+            return True
+
+        db = get_database()
+        try:
+            with db.get_connection() as conn:
+                if conn is None:
+                    # Fails open, same as every other guard check in this module.
+                    return True
+                cur = conn.cursor()
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{org_id}:{resource}",))
+
+                cur.execute(
+                    "SELECT count FROM cgc_guard.tenant_usage WHERE org_id = %s AND resource = %s AND period = %s",
+                    (org_id, resource, self._period())
+                )
+                row = cur.fetchone()
+                current = row["count"] if row else 0
+
+                if current >= limit:
+                    return False
+
+                cur.execute(
+                    "INSERT INTO cgc_guard.tenant_usage (org_id, resource, period, count) "
+                    "VALUES (%s, %s, %s, 1) "
+                    "ON CONFLICT (org_id, resource, period) "
+                    "DO UPDATE SET count = cgc_guard.tenant_usage.count + 1, updated_at = NOW()",
+                    (org_id, resource, self._period())
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.warning(f"[tenant] reserve_quota failed for {org_id}/{resource} (non-fatal, allowing): {e}")
+            return True
 
     def check_feature(self, org_id: str, feature: str) -> bool:
         """Check if tenant has access to a feature."""

@@ -24,7 +24,6 @@ from pathlib import Path
 
 # CGC CORE - Unified Governance System
 from app.Core.tenant.multi_tenant import tenant_manager
-from app.modules.compliance.compliance_engine import ComplianceEngine
 from app.Core.db.database import get_database
 from app.Core.auth.auth_system import AuthSystem
 from app.Core.config import config
@@ -78,8 +77,43 @@ class CGCCoreEngine(FastAPI):
     
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+
+        # Wires the real logging pipeline (file + console + the
+        # cgc_audit_traces DB handler + optional syslog/HTTP) into the root
+        # logger. Was defined but never called anywhere in the whole repo --
+        # cgc_audit_traces (this codebase's own "immutable audit trail for
+        # all governance events") was therefore always empty; its only
+        # writer, CGCLoggingHandler, was never attached to anything. Fixed
+        # two real bugs inside logging_config.py itself first (see that
+        # file): CGCLoggingHandler.emit() was reading a record.extra
+        # attribute that never exists (extra={} keys land as top-level
+        # record attributes, not nested), so decision_id/user_id were
+        # always None regardless of what callers passed; and the shared
+        # formatter hard-requires %(decision_id)s, which most log calls
+        # never set, which used to raise inside every handler's format()
+        # call. Called first, before any other module below, so their own
+        # __init__-time log lines are captured too. Guarded per the
+        # cgc_jla-outage lesson -- a logging setup failure must never take
+        # the app down.
+        try:
+            logging_config.setup_logging()
+        except Exception as e:
+            logger.warning(f"[Logging] setup_logging() failed (non-fatal, falls back to default logging): {e}")
+
         self.db = get_database()
-        self.auth = AuthSystem()
+
+        # AuthSystem() was the one __init__ step still unguarded -- unlike
+        # every other module here, a failure inside it (e.g. os.makedirs on
+        # a misconfigured/non-writable CGC_AUTH_DATA_DIR) used to take down
+        # the ENTIRE app at import time, not just auth-gated routes. Falling
+        # back to None means /health and the unauthenticated routes stay up
+        # even if auth is broken -- get_current_user() below raises a clean
+        # 503 instead of an unhandled AttributeError either way.
+        try:
+            self.auth = AuthSystem()
+        except Exception as e:
+            logger.error(f"[Auth] AuthSystem init failed (non-fatal, auth-gated routes will 503): {e}")
+            self.auth = None
 
         # ====================================================================
         # CGC GOVERNANCE MODULES - Unified System
@@ -99,8 +133,21 @@ class CGCCoreEngine(FastAPI):
         self.tco = TCO()
 
         # Orchestration & Compliance
-        self.cgc_loop = LOOP()
-        self.compliance_engine = ComplianceEngine(self.scm, self.tco) if self.scm and self.tco else None
+        # LOOP receives the SAME scm/pan/ecm/pfm/sda/tco instances above,
+        # instead of building its own separate set (2026-08-22 fix) -- every
+        # real /governance/decision call runs through LOOP, so
+        # GET /governance/modules/{name}/metrics and /status/nodes (which
+        # read app.pan/app.ecm/... directly) now reflect real traffic
+        # instead of permanently-zero counters on objects nothing ever
+        # calls. self.compliance_engine reuses LOOP's own ComplianceEngine
+        # (built from these same scm/tco instances) rather than
+        # constructing a second one that was only ever used for a boolean
+        # presence check in /status/nodes.
+        self.cgc_loop = LOOP(
+            scm=self.scm, pan=self.pan, ecm=self.ecm,
+            pfm=self.pfm, sda=self.sda, tco=self.tco,
+        )
+        self.compliance_engine = self.cgc_loop.compliance
 
         # Proof-of-Decision: pre-delivery cryptographic non-repudiation.
         # Instantiation itself never touches the DB (persistence is lazy,
@@ -128,6 +175,8 @@ security = HTTPBearer()
 
 # CGC AUTH (PRODUCTION READY)
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if app.auth is None:
+        raise HTTPException(status_code=503, detail="Auth system unavailable")
     user_info = app.auth.verify_token(credentials.credentials)
     if not user_info:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -276,6 +325,9 @@ class SignIn(BaseModel):
 
 @app.post("/auth/signup", tags=["Auth"])
 async def signup(data: SignUp, request: Request):
+    if app.auth is None:
+        raise HTTPException(status_code=503, detail="Auth system unavailable")
+
     # 5/hour per IP -- generous for real onboarding, a real backstop
     # against signup spam (there was none before Phase 2).
     client_ip = request.client.host if request.client else "unknown"
@@ -294,6 +346,9 @@ async def signup(data: SignUp, request: Request):
 
 @app.post("/auth/signin", tags=["Auth"])
 async def signin(data: SignIn, request: Request):
+    if app.auth is None:
+        raise HTTPException(status_code=503, detail="Auth system unavailable")
+
     # Was calling app.auth.create_session_token(...), a method that never
     # existed on AuthSystem -- every real signin attempt 500'd before this
     # fix. AuthSystem.login() is the real method: bcrypt password check,
@@ -316,6 +371,23 @@ async def signin(data: SignIn, request: Request):
 @app.get("/admin/users", tags=["Admin"])
 async def list_users(user=Depends(require_admin)):
     return app.auth.list_users()
+
+@app.post("/admin/cleanup/guard-tables", tags=["Admin"])
+async def cleanup_guard_tables(user=Depends(require_admin)):
+    """
+    Deletes rows past retention from the 4 cgc_guard.* telemetry tables
+    (rate_limit_events, login_attempts, suspicious_payloads,
+    internal_flags) -- none of them had any cleanup mechanism before this
+    (2026-08-22 audit finding #9), so they grew unboundedly forever.
+
+    This process has no scheduler of its own -- wire this endpoint up to
+    whatever recurring trigger is available (Vercel Cron, a GitHub Action,
+    cron-job.com, ...) with the admin bearer token. Deliberately does NOT
+    touch cgc_tco.audit_trail or cgc_pod.* -- see
+    Database.cleanup_guard_tables()'s docstring for why those need an
+    archival strategy instead of a plain delete.
+    """
+    return app.db.cleanup_guard_tables()
 
 # =========================
 # BILLING + TENANT
