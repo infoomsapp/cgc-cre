@@ -239,17 +239,26 @@ class TCO:
             result_hash = self._hash_data(decision_summary)
             
             # ================================================================
-            # Generate block hash
-            # ================================================================
-            previous_hash = self._get_last_hash()
-            block_number = self._get_total_entries() + 1
-            block_hash = self._generate_block_hash(audit_data, previous_hash)
-            
-            # ================================================================
-            # Store in database
-            # ================================================================
-            self._store_audit_entry(
-                block_number=block_number,
+            # Atomically determine block_number/previous_hash, generate the
+            # block hash, and store -- all inside one Postgres advisory-lock-
+            # guarded transaction. This used to be 3 separate connections
+            # (_get_last_hash, _get_total_entries, _store_audit_entry) with
+            # no locking at all -- under real concurrent decisions, two
+            # requests could both read the same "next block_number", both
+            # try to insert it, and the loser's row would be silently
+            # dropped (block_number is UNIQUE; _store_audit_entry's own
+            # except caught the collision and just logged a warning,
+            # returning as if it had succeeded). That decision's response
+            # still looked like a normal 200/APPROVE -- its audit_trail row
+            # simply never existed. Found live via a genuine-concurrency
+            # test (2 of 5 simultaneous same-tenant decisions came back
+            # "decision_not_found" from /verify despite each returning a
+            # normal success response) -- same architectural gap as PoD's
+            # block-sequencing bug, fixed with the same pattern
+            # (seal_block_atomic in pod_repository.py), adapted for this
+            # module's synchronous psycopg2 connection instead of asyncpg.
+            sealed = self._seal_and_store_atomic(
+                audit_data=audit_data,
                 timestamp=timestamp,
                 decision_id=decision_id,
                 module_source=module_source,
@@ -258,8 +267,6 @@ class TCO:
                 action=action,
                 data_hash=data_hash,
                 result_hash=result_hash,
-                previous_hash=previous_hash,
-                block_hash=block_hash,
                 compliance_owner_present=compliance_owner,
                 critical_framework_violated=critical_framework_violated,
                 human_review_required=human_review_required,
@@ -270,7 +277,13 @@ class TCO:
                 tenant_id=tenant_id,
                 aggregated_score=aggregated_score
             )
-            
+            if sealed is None:
+                raise RuntimeError("TCO atomic seal failed -- see logged error above")
+
+            block_number = sealed["block_number"]
+            previous_hash = sealed["previous_hash"]
+            block_hash = sealed["block_hash"]
+
             # Update chain state
             self.last_block_hash = block_hash
             self.total_entries = block_number
@@ -348,9 +361,9 @@ class TCO:
     # STORAGE
     # ========================================================================
 
-    def _store_audit_entry(
+    def _seal_and_store_atomic(
         self,
-        block_number: int,
+        audit_data: Dict[str, Any],
         timestamp: str,
         decision_id: str,
         module_source: str,
@@ -359,8 +372,6 @@ class TCO:
         action: str,
         data_hash: str,
         result_hash: str,
-        previous_hash: str,
-        block_hash: str,
         compliance_owner_present: bool,
         critical_framework_violated: bool,
         human_review_required: bool,
@@ -370,14 +381,41 @@ class TCO:
         outcome: Optional[str] = None,
         tenant_id: Optional[str] = None,
         aggregated_score: Optional[float] = None
-    ):
-        """Store audit entry in database."""
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Determines block_number/previous_hash, generates the block hash, and
+        inserts -- all inside one Postgres advisory-lock-guarded transaction
+        (pg_advisory_xact_lock, transaction-scoped, auto-released on commit/
+        rollback). cgc_tco.audit_trail is ONE global sequential chain (not
+        per-tenant like cgc_pod.pod_ledger), so this locks a single fixed
+        key shared by every caller -- correct here since there is only one
+        chain to serialize, unlike PoD's per-tenant lock.
+
+        Returns {block_number, previous_hash, block_hash} on success, or
+        None if the DB is unavailable or the insert genuinely fails for a
+        reason other than a benign concurrent-retry collision.
+        """
         try:
             with self._db.get_connection() as conn:
                 if conn is None:
-                    logger.error("[TCO] Store entry failed: no database connection")
-                    return
+                    logger.error("[TCO] Atomic seal failed: no database connection")
+                    return None
                 cursor = conn.cursor()
+
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("cgc_tco_audit_trail",))
+
+                cursor.execute("""
+                    SELECT COALESCE(MAX(block_number), 0) AS max_num,
+                           (SELECT block_hash FROM cgc_tco.audit_trail
+                             ORDER BY block_number DESC LIMIT 1) AS last_hash
+                    FROM cgc_tco.audit_trail
+                """)
+                row = cursor.fetchone()
+                block_number = (row["max_num"] if row and row["max_num"] else 0) + 1
+                previous_hash = (row["last_hash"] if row and row["last_hash"] else None) or self._get_genesis_hash()
+
+                block_hash = self._generate_block_hash(audit_data, previous_hash)
+
                 cursor.execute('''
                     INSERT INTO cgc_tco.audit_trail
                     (
@@ -398,12 +436,15 @@ class TCO:
                     app_source, outcome, tenant_id, aggregated_score
                 ))
 
+            return {
+                "block_number": block_number,
+                "previous_hash": previous_hash,
+                "block_hash": block_hash,
+            }
+
         except Exception as e:
-            if "duplicate key" in str(e).lower() or "unique constraint" in str(e).lower():
-                logger.warning(f"[TCO] Duplicate block {block_number}, skipping insert")
-            else:
-                logger.error(f"[TCO] Store entry failed: {e}")
-                raise
+            logger.error(f"[TCO] Atomic seal failed: {e}")
+            return None
 
     # ========================================================================
     # CHAIN VERIFICATION & TAMPER DETECTION
