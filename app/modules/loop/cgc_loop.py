@@ -688,21 +688,20 @@ class LOOP:
             # double-count every decision.
             self._update_metrics(decision_outcome, overall_start)
             
-            # Determinar cumplimiento EU AI Act
-            eu_ai_act_compliant = False
             compliance_report = signed_artifact.get("audit_report_path")
-            if self.compliance and "compliance" in signed_artifact:
-                try:
-                    compliance_data = signed_artifact.get("compliance", {})
-                    if hasattr(compliance_data, 'profile'):
-                        eu_ai_act_compliant = compliance_data.profile.rmf_score.get("Govern", 0) > 80
-                    elif isinstance(compliance_data, dict) and "profile" in compliance_data:
-                        profile = compliance_data["profile"]
-                        if isinstance(profile, dict) and "rmf_score" in profile:
-                            eu_ai_act_compliant = profile["rmf_score"].get("Govern", 0) > 80
-                except Exception as e:
-                    logger.warning(f"Error checking EU AI Act compliance: {e}")
-            
+            # Was: a "eu_ai_act_compliant" boolean derived here as
+            # rmf_score.get("Govern", 0) > 80 -- but rmf_score comes from
+            # ComplianceEngine._load_profiles(), a static per-industry table
+            # ({"banking": Govern=75, "healthcare": Govern=88, ...}) that
+            # does not vary with the actual decision being governed. Every
+            # "healthcare"-area decision got True and every other area got
+            # False, regardless of outcome, risk, or content -- a
+            # fabricated-looking per-decision certification flag, not a
+            # real compliance determination. Removed from the response
+            # rather than reworded; signed_artifact["compliance"] (the raw
+            # ComplianceSummary: checklist, overall_score, passed/failed/
+            # pending) and compliance_report (the generated PDF) still
+            # carry the actual evaluation output for anyone who wants it.
             final_response = {
                 "approved": decision_outcome == LoopOutcome.APPROVE,
                 "outcome": decision_outcome.value,
@@ -713,7 +712,6 @@ class LOOP:
                 "processing_time_ms": round((time.time() - overall_start) * 1000, 2),
                 "area": area,
                 "sensitivity_level": sensitivity_level,
-                "eu_ai_act_compliant": eu_ai_act_compliant,
                 "compliance_report": compliance_report,
                 "prefilter_result": prefilter_dict
             }

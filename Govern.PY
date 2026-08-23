@@ -94,7 +94,9 @@ async def govern(
             aggregated_score=result.get("decision_artifact", {}).get("aggregated_score"),
             area=result.get("area", prefilter_result["areaIdentified"]),
             sensitivity_level=result.get("sensitivity_level", "MEDIUM"),
-            eu_ai_act_compliant=result.get("eu_ai_act_compliant"),
+            # eu_ai_act_compliant field removed from GovernResponse (see
+            # schemas.py) -- it was a fabricated-looking per-decision
+            # "compliant" verdict, not a real determination.
             pod=result.get("decision_artifact", {}).get("pod"),
             processing_time_ms=processing_ms,
             verify_url=verify_url,

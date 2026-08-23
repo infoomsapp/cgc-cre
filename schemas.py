@@ -118,7 +118,14 @@ class GovernResponse(BaseModel):
     aggregated_score:   Optional[float] = None
     area:               str
     sensitivity_level:  str
-    eu_ai_act_compliant: Optional[bool] = None
+    # Was eu_ai_act_compliant: Optional[bool] -- a per-decision "IS
+    # compliant" verdict that cgc_loop.py derived solely from a static,
+    # hardcoded per-industry NIST RMF "Govern" score in
+    # ComplianceEngine._load_profiles() (e.g. every "healthcare" decision
+    # got True, every other area got False), with no relation to the actual
+    # decision content. A fabricated-looking certification flag, not a real
+    # compliance determination -- removed rather than reworded, same as the
+    # root endpoint's "compliance" field.
     pod:                Optional[Dict[str, Any]] = None
     processing_time_ms: float
     verify_url:         str = Field(..., description="URL to forensic verification")
