@@ -225,16 +225,28 @@ app.include_router(
 
 # Mount the internal-guard router → /guard/internal/report
 # Read-only misuse-detection report over the TCO ledger; no write path touched.
+# require_admin_or_service, not get_current_user (2026-08-22 audit, SEC-002):
+# these reports take tenant_id/module_source as caller-supplied query params
+# with no check that they belong to the caller -- any self-registered "user"
+# account could read another tenant's escalation-chain/cross-tenant-reach
+# findings. This is a platform-operator view (crosses tenant boundaries by
+# design), so it's scoped to admin/service like /admin/* already is, not
+# opened to every authenticated user.
 app.include_router(
     internal_guard_router, prefix="/guard/internal", tags=["Internal Guard"],
-    dependencies=[Depends(get_current_user)]
+    dependencies=[Depends(require_admin_or_service)]
 )
 
 # Mount the guard-activity router → /guard/activity/*
 # Dashboard-visibility reads only; no write path touched.
+# require_admin_or_service, not get_current_user (2026-08-22 audit, SEC-002):
+# these routes have no tenant scoping at all -- suspicious-payloads/
+# internal-flags/login-stats read platform-wide, across every tenant, so
+# they're operator-only surfaces (same dashboard the /admin/* routes serve),
+# not something any signed-up user should be able to hit.
 app.include_router(
     guard_activity_router, prefix="/guard/activity", tags=["Guard Activity"],
-    dependencies=[Depends(get_current_user)]
+    dependencies=[Depends(require_admin_or_service)]
 )
 
 # PreFilter Helper
@@ -337,7 +349,14 @@ class SignUp(BaseModel):
     email: EmailStr
     password: str
     name: str = ""
-    role: str = "user"
+    # role deliberately NOT accepted here (2026-08-22 audit, SEC-001):
+    # this used to be a caller-supplied field passed straight to
+    # create_user(role=data.role) on an unauthenticated endpoint --
+    # anyone could self-register role="admin" and sign in with it,
+    # passing require_admin on every admin route including
+    # /admin/cleanup/guard-tables. Self-service signup always creates a
+    # plain "user" account now (see signup() below); elevated roles
+    # (admin/governance_admin/auditor/service) are provisioned out-of-band.
     model_config = ConfigDict(from_attributes=True)
 
 class SignIn(BaseModel):
@@ -362,7 +381,9 @@ async def signup(data: SignUp, request: Request):
     # all (create_user never accepted one), so it's dropped here rather
     # than invented a home for it -- same practical effect as before
     # (silently unused), just without corrupting `role` in the process.
-    app.auth.create_user(data.email, data.password, role=data.role)
+    # role is now always "user" (SignUp no longer accepts one -- see SEC-001
+    # comment above); this is create_user()'s own default, made explicit here.
+    app.auth.create_user(data.email, data.password, role="user")
     return {"message": "User created successfully"}
 
 @app.post("/auth/signin", tags=["Auth"])
@@ -417,13 +438,20 @@ async def cleanup_guard_tables(user=Depends(require_admin_or_service)):
 # =========================
 # BILLING + TENANT
 # =========================
+# require_admin_or_service, not get_current_user (2026-08-22 audit, SEC-002):
+# org_id is a caller-supplied path/form value with no check that it belongs
+# to the caller -- there's no per-user tenant binding anywhere in this
+# codebase's auth model (verify_token() only ever returns email+role), so
+# any self-registered "user" account could change or read ANY org's billing
+# plan. Until real per-user tenant ownership exists, these stay
+# operator/service-only, same as the guard-visibility routes above.
 @app.post("/billing/upgrade", tags=["Billing"])
-async def upgrade_plan(org_id: str = Form(...), plan: str = Form(...), user=Depends(get_current_user)):
+async def upgrade_plan(org_id: str = Form(...), plan: str = Form(...), user=Depends(require_admin_or_service)):
     result = tenant_manager.upgrade_plan(org_id, plan)
     return result
 
 @app.get("/billing/usage/{org_id}", tags=["Billing"])
-async def get_usage(org_id: str, user=Depends(get_current_user)):
+async def get_usage(org_id: str, user=Depends(require_admin_or_service)):
     tenant = tenant_manager.get_tenant(org_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
