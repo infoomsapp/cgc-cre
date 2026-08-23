@@ -1,3 +1,14 @@
-
 .env
-*.env
+.env.*
+data/*.db
+data/*.db-*
+data/*.json
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.git/
+node_modules/
