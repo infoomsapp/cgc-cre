@@ -67,7 +67,7 @@ def record_suspicious_payload(decision_id: Optional[str], org_id: Optional[str],
     """Soft-flag record -- stores which pattern/field matched, never the payload content."""
     db = get_database()
     try:
-        with db.get_connection() as conn:
+        with db.get_scoped_connection(tenant_id=org_id) as conn:
             if conn is None:
                 return
             cur = conn.cursor()

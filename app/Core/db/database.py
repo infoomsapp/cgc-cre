@@ -53,6 +53,12 @@ class Database:
         self.use_postgres = False
         self.data_dir = 'data'
         self.json_lock = threading.Lock()
+        # Lazily created on first get_scoped_connection() call -- see there.
+        # Deliberately NOT created here at boot: this project's own history
+        # (2026-08-23) is that adding eager DB work to __init__ pushes cold
+        # starts past Vercel's function timeout.
+        self._app_pool = None
+        self._app_pool_lock = threading.Lock()
         
         self._init_connection()
         self._create_tables()
@@ -145,6 +151,88 @@ class Database:
                 self.pool.putconn(conn)
         else:
             yield None
+
+    def _get_app_pool(self):
+        """
+        Lazily creates a SECOND connection pool, separate from self.pool,
+        that connects as `cgc_app` (2026-08-23 RLS work -- see
+        _create_rls_policies()) instead of `postgres`. Reads CGC_DATABASE_URL,
+        the same env var pod_repository.py already uses for exactly this
+        role, falling back to DATABASE_URL (== postgres, RLS-exempt via
+        rolbypassrls) when it isn't set -- so this degrades to today's
+        behavior with zero config changes required, and genuinely enforces
+        tenant scoping only once CGC_DATABASE_URL is actually pointed at
+        cgc_app.
+
+        Deliberately never touched by __init__/_init_connection() -- boot
+        stays exactly as fast as it is today regardless of whether this is
+        ever called. Double-checked locking mirrors pod_repository.py's
+        get_pool(), same cache-stampede concern (concurrent cold-start
+        requests racing to create the pool).
+        """
+        if self._app_pool is not None:
+            return self._app_pool
+        with self._app_pool_lock:
+            if self._app_pool is not None:
+                return self._app_pool
+            app_url = os.getenv("CGC_DATABASE_URL") or self.postgres_url
+            if not app_url or not POSTGRES_AVAILABLE:
+                return None
+            try:
+                self._app_pool = pool.ThreadedConnectionPool(
+                    1, 10, app_url,
+                    connection_factory=psycopg2.extras.RealDictConnection
+                )
+                logger.info("cgc_app connection pool active")
+            except Exception as e:
+                logger.error(f"cgc_app pool creation failed (tenant-scoped writes will use the admin pool instead): {e}")
+                return None
+            return self._app_pool
+
+    @contextmanager
+    def get_scoped_connection(self, tenant_id: Optional[str] = None):
+        """
+        Like get_connection(), but for tenant-scoped tables that have a real
+        RLS policy checking cgc.current_tenant_id (cgc_guard.internal_flags/
+        suspicious_payloads/tenant_plans/tenant_usage -- see
+        _create_rls_policies()). Sets the session variable via set_config
+        (parameterized, not string-interpolated) before yielding.
+
+        NOT for cgc_tco.audit_trail -- that table is one global sequential
+        chain, not per-tenant (unlike cgc_pod.pod_ledger), so its own
+        block-numbering query needs to see every tenant's rows to compute
+        the next block_number correctly. Scoping that connection by tenant
+        would silently corrupt the chain. audit_trail's writes stay on
+        get_connection() (the unrestricted admin pool) permanently, by
+        design -- not a gap to close later.
+
+        Falls back to get_connection() (the admin pool) if the app pool
+        can't be created, or if no tenant_id was given -- a tenant-scoped
+        connection with nothing to scope to would fail every write's RLS
+        WITH CHECK (current_setting() returns NULL, and tenant_id = NULL
+        is never true), so callers that sometimes legitimately have no
+        tenant_id (e.g. record_internal_flag's cross-tenant-reach findings)
+        correctly fall back to the unrestricted connection instead of
+        having those specific calls silently start failing.
+        """
+        app_pool = self._get_app_pool()
+        if app_pool is None or not tenant_id:
+            with self.get_connection() as conn:
+                yield conn
+            return
+
+        conn = app_pool.getconn()
+        try:
+            if tenant_id:
+                cur = conn.cursor()
+                cur.execute("SELECT set_config('cgc.current_tenant_id', %s, true)", (tenant_id,))
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            app_pool.putconn(conn)
 
     def _create_tables(self):
         """Create all CGC governance tables."""

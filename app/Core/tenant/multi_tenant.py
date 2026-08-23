@@ -75,7 +75,7 @@ class TenantManager:
         CGC_TENANT_{ORG}_PLAN deployment working unchanged."""
         db = get_database()
         try:
-            with db.get_connection() as conn:
+            with db.get_scoped_connection(tenant_id=org_id) as conn:
                 if conn is not None:
                     cur = conn.cursor()
                     cur.execute("SELECT plan FROM cgc_guard.tenant_plans WHERE org_id = %s", (org_id,))
@@ -93,7 +93,7 @@ class TenantManager:
 
         db = get_database()
         try:
-            with db.get_connection() as conn:
+            with db.get_scoped_connection(tenant_id=org_id) as conn:
                 if conn is None:
                     return {"success": False, "error": "no database connection"}
                 cur = conn.cursor()
@@ -122,7 +122,7 @@ class TenantManager:
     def _get_usage(self, org_id: str, resource: str) -> int:
         db = get_database()
         try:
-            with db.get_connection() as conn:
+            with db.get_scoped_connection(tenant_id=org_id) as conn:
                 if conn is None:
                     return 0
                 cur = conn.cursor()
@@ -139,7 +139,7 @@ class TenantManager:
     def _increment_usage(self, org_id: str, resource: str, amount: int) -> None:
         db = get_database()
         try:
-            with db.get_connection() as conn:
+            with db.get_scoped_connection(tenant_id=org_id) as conn:
                 if conn is None:
                     return
                 cur = conn.cursor()
@@ -227,7 +227,7 @@ class TenantManager:
 
         db = get_database()
         try:
-            with db.get_connection() as conn:
+            with db.get_scoped_connection(tenant_id=org_id) as conn:
                 if conn is None:
                     # Fails open, same as every other guard check in this module.
                     return True
@@ -270,7 +270,7 @@ class TenantManager:
     def get_usage(self, org_id: str) -> Dict[str, Any]:
         db = get_database()
         try:
-            with db.get_connection() as conn:
+            with db.get_scoped_connection(tenant_id=org_id) as conn:
                 if conn is None:
                     return {}
                 cur = conn.cursor()

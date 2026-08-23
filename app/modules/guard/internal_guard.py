@@ -225,7 +225,7 @@ def record_internal_flag(flag_type: str, tenant_id: Optional[str], module_source
     import json as _json
     db = get_database()
     try:
-        with db.get_connection() as conn:
+        with db.get_scoped_connection(tenant_id=tenant_id) as conn:
             if conn is None:
                 return
             cur = conn.cursor()
