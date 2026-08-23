@@ -1360,6 +1360,13 @@ class Database:
                     )
 
                 cur.execute("GRANT USAGE ON SCHEMA cgc_pod, cgc_tco, cgc_guard TO cgc_app")
+                # extensions.uuid_generate_v5 -- needed by the pod_ledger policy
+                # below; USAGE on the schema is separate from EXECUTE on the
+                # function, both are required. Found live during pre-cutover
+                # verification (2026-08-23): missing this caused "permission
+                # denied for schema extensions" even though cgc_app already had
+                # EXECUTE on the function itself.
+                cur.execute("GRANT USAGE ON SCHEMA extensions TO cgc_app")
                 cur.execute("""
                     GRANT SELECT, INSERT, UPDATE ON
                         cgc_pod.inference_intercepts, cgc_pod.pod_ledger, cgc_pod.chain_integrity_log,
@@ -1383,8 +1390,13 @@ class Database:
                      "tenant_id = current_setting('cgc.current_tenant_id', true)"),
                     ("cgc_pod.chain_integrity_log", "tenant_scope",
                      "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                    # extensions.uuid_generate_v5 -- schema-qualified deliberately.
+                    # Supabase installs uuid-ossp into `extensions`, not `public`;
+                    # cgc_app's search_path doesn't include it, so an unqualified
+                    # call fails with "function does not exist" -- found live
+                    # during pre-cutover verification (2026-08-23), not guessed.
                     ("cgc_pod.pod_ledger", "tenant_scope",
-                     "tenant_id = uuid_generate_v5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid, "
+                     "tenant_id = extensions.uuid_generate_v5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid, "
                      "current_setting('cgc.current_tenant_id', true))"),
                     ("cgc_tco.audit_trail", "tenant_scope",
                      "tenant_id = current_setting('cgc.current_tenant_id', true)"),
