@@ -61,6 +61,7 @@ class Database:
         self._create_tco_schema()
         self._create_guard_schema()
         self._create_auth_schema()
+        self._create_rls_policies()
 
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
@@ -1279,6 +1280,117 @@ class Database:
                 logger.info("cgc_auth schema created/verified")
         except Exception as e:
             logger.error(f"cgc_auth schema provisioning failed (non-fatal, AuthSystem will fall back to JSON files until fixed): {e}")
+
+    def _create_rls_policies(self):
+        """
+        2026-08-23 audit follow-up: real Row-Level Security for CGC Core's
+        tenant-scoped tables. Live inspection of the actual database found
+        that RLS was enabled on none of the 8 tenant-identifiable tables
+        (cgc_pod.pod_ledger was the lone exception -- enabled, but with
+        zero policies, so still fully open), and that this app's own
+        connecting role, `postgres`, has rolbypassrls=true and owns every
+        table -- a fact independent of superuser status, so no policy
+        written here can ever restrict it. RLS as documentation only means
+        nothing without a second role that actually can't bypass it.
+
+        This method creates that role, `cgc_app` (LOGIN, no BYPASSRLS, no
+        DDL rights -- just SELECT/INSERT/UPDATE on the 8 tables below), and
+        writes the real policies. `postgres` keeps doing DDL and every
+        cross-tenant admin read (guard_activity, internal_guard, flow_score,
+        billing -- already gated by require_admin_or_service at the API
+        layer, and RLS is a deliberate no-op for it regardless of what's
+        written here) -- only `cgc_app` is meant to ever be tenant-scoped.
+
+        Wiring: nothing connects as `cgc_app` until CGC_DATABASE_URL is
+        updated to use it. Only app/modules/pod/pod_repository.py has the
+        set_config('cgc.current_tenant_id', ...) plumbing a policy can key
+        off of today (see get_connection() there) -- TCO and the 4
+        tenant-scoped cgc_guard tables get policies here too (safe, since
+        nothing uses cgc_app for them yet), but wiring their write/read
+        paths to actually set that session variable is a deliberate,
+        separate follow-up, not done in this pass.
+
+        cgc_pod.pod_ledger stores tenant_id as the uuid5 of the raw tenant
+        id (see pod_repository.py's _ledger_uid()), not the raw string
+        set_config() receives -- its policy has to reproduce that same
+        derivation (uuid_generate_v5 against uuid.NAMESPACE_DNS's fixed
+        value) rather than a plain equality, or it would never match.
+        """
+        if not self.use_postgres:
+            return
+
+        app_role_password = os.getenv("CGC_APP_ROLE_PASSWORD")
+        if not app_role_password:
+            logger.warning("CGC_APP_ROLE_PASSWORD not set -- skipping cgc_app role/RLS setup")
+            return
+
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+
+                cur.execute("SELECT 1 FROM pg_roles WHERE rolname = 'cgc_app'")
+                if cur.fetchone():
+                    # Password-only on repeat runs -- Supabase's `postgres` role
+                    # is not a true superuser (rolsuper=false, confirmed live),
+                    # and Postgres refuses ANY role's SUPERUSER-related clauses
+                    # (even a no-op NOSUPERUSER restatement) from a non-superuser
+                    # caller, superuser-status unchanged or not. Found live: the
+                    # first CREATE ROLE (below) succeeds fine since it never
+                    # requests SUPERUSER; only re-stating it on ALTER breaks.
+                    cur.execute("ALTER ROLE cgc_app WITH LOGIN PASSWORD %s", (app_role_password,))
+                else:
+                    cur.execute(
+                        "CREATE ROLE cgc_app WITH LOGIN PASSWORD %s NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE",
+                        (app_role_password,)
+                    )
+
+                cur.execute("GRANT USAGE ON SCHEMA cgc_pod, cgc_tco, cgc_guard TO cgc_app")
+                cur.execute("""
+                    GRANT SELECT, INSERT, UPDATE ON
+                        cgc_pod.inference_intercepts, cgc_pod.pod_ledger, cgc_pod.chain_integrity_log,
+                        cgc_tco.audit_trail,
+                        cgc_guard.internal_flags, cgc_guard.suspicious_payloads,
+                        cgc_guard.tenant_plans, cgc_guard.tenant_usage
+                    TO cgc_app
+                """)
+                # SERIAL/IDENTITY id columns (internal_flags.id, suspicious_payloads.id,
+                # pod_ledger.block_id, etc.) need sequence USAGE too, or every INSERT
+                # from cgc_app fails with "permission denied for sequence" -- found live
+                # while verifying this migration, not something GRANT ... ON TABLE covers.
+                cur.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA cgc_pod TO cgc_app")
+                cur.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA cgc_tco TO cgc_app")
+                cur.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA cgc_guard TO cgc_app")
+
+                # (table, tenant column, using-clause) -- pod_ledger's is the
+                # odd one out per the uuid5 note in the docstring above.
+                policies = [
+                    ("cgc_pod.inference_intercepts", "tenant_scope",
+                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                    ("cgc_pod.chain_integrity_log", "tenant_scope",
+                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                    ("cgc_pod.pod_ledger", "tenant_scope",
+                     "tenant_id = uuid_generate_v5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid, "
+                     "current_setting('cgc.current_tenant_id', true))"),
+                    ("cgc_tco.audit_trail", "tenant_scope",
+                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                    ("cgc_guard.internal_flags", "tenant_scope",
+                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                    ("cgc_guard.suspicious_payloads", "tenant_scope",
+                     "org_id = current_setting('cgc.current_tenant_id', true)"),
+                    ("cgc_guard.tenant_plans", "tenant_scope",
+                     "org_id = current_setting('cgc.current_tenant_id', true)"),
+                    ("cgc_guard.tenant_usage", "tenant_scope",
+                     "org_id = current_setting('cgc.current_tenant_id', true)"),
+                ]
+                for table, policy_name, using_clause in policies:
+                    cur.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+                    cur.execute(f"DROP POLICY IF EXISTS {policy_name} ON {table}")
+                    cur.execute(f"CREATE POLICY {policy_name} ON {table} USING ({using_clause})")
+
+                conn.commit()
+                logger.info("cgc_app role + RLS policies created/verified")
+        except Exception as e:
+            logger.error(f"RLS policy setup failed (non-fatal, tables remain accessible only via the postgres role): {e}")
 
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)
