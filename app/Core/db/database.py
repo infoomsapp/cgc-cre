@@ -61,7 +61,22 @@ class Database:
         self._create_tco_schema()
         self._create_guard_schema()
         self._create_auth_schema()
-        self._create_rls_policies()
+        # _create_rls_policies() is deliberately NOT called here. Found live
+        # (2026-08-23): running it on every cold start adds a full extra
+        # sequential DB round-trip (role check/ALTER + several GRANTs + 8x
+        # ENABLE RLS/DROP POLICY/CREATE POLICY) on top of the 5 schema
+        # methods above, pushing this app's already-serial boot chain past
+        # ~20s locally -- with no vercel.json maxDuration configured, that's
+        # enough to blow the default function timeout, which surfaced as
+        # FUNCTION_INVOCATION_FAILED on *every* route (health included)
+        # during cold starts, not just the ones touching RLS. It's a
+        # one-time migration, not a per-boot invariant like the other
+        # schema methods -- the role/grants/policies already exist in
+        # production (verified live: real cross-tenant isolation test
+        # passed, including the pod_ledger uuid5 policy). Call it manually
+        # (a short script instantiating Database() with this one line
+        # temporarily re-added, or directly) if the policies ever need to
+        # be recreated -- e.g. after adding a new tenant-scoped table.
 
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
