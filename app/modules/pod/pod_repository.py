@@ -146,6 +146,27 @@ async def get_connection(tenant_id: Optional[str] = None):
     Context manager: single DB connection with tenant RLS applied.
     Sets cgc.current_tenant_id so Row Level Security policies activate.
     Yields None if pool is unavailable.
+
+    The set_config(..., true) call is transaction-LOCAL by design (`true`
+    means is_local -- safe against a pooled connection leaking one
+    tenant's scope into the next request that reuses it, unlike
+    is_local=false which would persist on the physical connection past
+    this block). That safety only holds if the value is set inside the
+    SAME transaction as whatever the caller does with the yielded
+    connection -- found live (2026-08-23, right after cutting this
+    connection over to the real RLS-restricted `cgc_app` role, which is
+    what finally made the gap observable): set_config was previously
+    called as its own standalone statement, auto-committed in its own
+    implicit transaction the instant it ran, *before* callers like
+    seal_block_atomic opened their own separate `async with
+    conn.transaction():` for the actual writes -- so the tenant scope was
+    already gone by the time those writes ran, and every real PoD write
+    silently failed the RLS check (fail-open, no visible error;
+    /verify/{decision_id} started returning proof_of_decision: null for
+    every new decision). Wrapping the whole yielded block in one explicit
+    transaction here fixes it -- a caller's own `async with
+    conn.transaction():` nests as a savepoint inside this one, so
+    existing callers (seal_block_atomic) need no changes.
     """
     pool = await get_pool()
     if pool is None:
@@ -154,14 +175,17 @@ async def get_connection(tenant_id: Optional[str] = None):
 
     async with pool.acquire() as conn:
         if tenant_id:
-            # set_config() is parameterizable (unlike `SET LOCAL var = 'value'`,
-            # which doesn't support bind params) -- SQL injection fix:
-            # tenant_id traces back to client-supplied org_id, and this used
-            # to be an f-string interpolated straight into raw SQL.
-            await conn.execute(
-                "SELECT set_config('cgc.current_tenant_id', $1, true)", tenant_id
-            )
-        yield conn
+            async with conn.transaction():
+                # set_config() is parameterizable (unlike `SET LOCAL var = 'value'`,
+                # which doesn't support bind params) -- SQL injection fix:
+                # tenant_id traces back to client-supplied org_id, and this used
+                # to be an f-string interpolated straight into raw SQL.
+                await conn.execute(
+                    "SELECT set_config('cgc.current_tenant_id', $1, true)", tenant_id
+                )
+                yield conn
+        else:
+            yield conn
 
 
 # ============================================================================
