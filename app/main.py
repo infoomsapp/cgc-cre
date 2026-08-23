@@ -776,7 +776,14 @@ async def seal_governance_decision(
     payload: Dict[str, Any],
     request: Request,
     user=Depends(get_current_user)
-) -> Dict[str, AuditHash]:
+) -> Dict[str, Any]:
+    # Was Dict[str, AuditHash] (AuditHash = str, line ~68) -- but the actual
+    # response mixes str values with "signed": app.scm is not None, a bool.
+    # FastAPI validates the return value against the declared type when
+    # there's no explicit response_model, so every real call failed response
+    # validation and surfaced as a 500 (found live, 2026-08-23, while
+    # verifying the RSA key rotation -- this endpoint was never covered by
+    # the governance-pipeline testing earlier in this project's history).
     """Seal a governance decision using SCM."""
     timestamp = datetime.now(timezone.utc).isoformat()
 
