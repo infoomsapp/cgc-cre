@@ -414,6 +414,20 @@ async def signin(data: SignIn, request: Request):
 async def list_users(user=Depends(require_admin)):
     return app.auth.list_users()
 
+@app.delete("/admin/users/{email}", tags=["Admin"])
+async def delete_user(email: str, user=Depends(require_admin)):
+    if app.auth is None:
+        raise HTTPException(status_code=503, detail="Auth system unavailable")
+    # Blocks an admin from deleting their own account via this endpoint --
+    # not a permissions issue (they're already authorized), just a guard
+    # against self-lockout with no recovery path other than a direct DB edit.
+    if email == user.get("email"):
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    result = app.auth.delete_user(email)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
 @app.post("/admin/cleanup/guard-tables", tags=["Admin"])
 async def cleanup_guard_tables(user=Depends(require_admin_or_service)):
     """

@@ -219,6 +219,31 @@ class AuthSystem:
             users[email].update(fields)
             self._save_users_json(users)
 
+    def _delete_user(self, email: str) -> bool:
+        """Returns True if a row was actually deleted."""
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return False
+                cur = conn.cursor()
+                cur.execute("DELETE FROM cgc_auth.users WHERE email = %s RETURNING email", (email,))
+                deleted = cur.fetchone() is not None
+                cur.execute("DELETE FROM cgc_auth.sessions WHERE email = %s", (email,))
+                conn.commit()
+                return deleted
+
+        users = self._load_users_json()
+        if email not in users:
+            return False
+        del users[email]
+        self._save_users_json(users)
+
+        sessions = self._load_sessions_json()
+        for token in [t for t, s in sessions.items() if s.get("email") == email]:
+            del sessions[token]
+        self._save_sessions_json(sessions)
+        return True
+
     def _list_users(self) -> List[Dict]:
         if self._db.use_postgres:
             with self._db.get_connection() as conn:
@@ -412,6 +437,20 @@ class AuthSystem:
                 "created_at": created_at,
             },
         }
+
+    def delete_user(self, email: str) -> Dict:
+        """
+        Permanently delete a user account and revoke every session it holds.
+        Sessions are deleted (not just the user row) because verify_token()
+        checks _get_session() on every request -- without this, a deleted
+        user's existing JWT would keep authenticating for up to 7 days
+        (AuthSystem.login()'s token lifetime) until natural expiry.
+        """
+        deleted = self._delete_user(email)
+        if not deleted:
+            return {"success": False, "error": "User not found"}
+        logger.info(f"[auth] user deleted: {email}")
+        return {"success": True, "message": "User deleted"}
 
     # ======================================================================
     # AUTH / SESSIONS
