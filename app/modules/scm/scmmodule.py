@@ -42,6 +42,7 @@ from cryptography.hazmat.backends import default_backend
 # Try to import boto3 for AWS KMS (optional)
 try:
     import boto3
+    from botocore.config import Config as BotoConfig
     from botocore.exceptions import ClientError
     AWS_KMS_AVAILABLE = True
 except ImportError:
@@ -131,8 +132,20 @@ class AWSKMSProvider(KMSProvider):
             raise RuntimeError("boto3 is not installed. Install with: pip install boto3")
 
         try:
+            # use_fips_endpoint routes every call through AWS's dedicated
+            # kms-fips.<region>.amazonaws.com endpoint instead of the
+            # standard one. AWS KMS's standard endpoints are ALSO backed by
+            # FIPS 140-2 Level 2 validated HSMs, but the FIPS endpoint is
+            # what makes that boundary explicit/contractual rather than
+            # incidental -- the distinction that matters when a government
+            # reviewer asks "how do you know," not just "is it true."
+            # CGC_KMS_USE_FIPS_ENDPOINT defaults on; set to "false" only if
+            # a target region genuinely lacks a FIPS endpoint.
+            use_fips = os.getenv("CGC_KMS_USE_FIPS_ENDPOINT", "true").lower() != "false"
             self.kms = boto3.client(
-                "kms", region_name=os.getenv("AWS_REGION", "us-east-1")
+                "kms",
+                region_name=os.getenv("AWS_REGION", "us-east-1"),
+                config=BotoConfig(use_fips_endpoint=use_fips),
             )
             self.master_key_id = os.getenv("AWS_KMS_MASTER_KEY_ID")
             if not self.master_key_id:
@@ -140,17 +153,26 @@ class AWSKMSProvider(KMSProvider):
                     "AWS_KMS_MASTER_KEY_ID environment variable is not configured"
                 )
             logger.info(
-                f"[KMS] AWS KMS provider initialized - Region: {os.getenv('AWS_REGION')}"
+                f"[KMS] AWS KMS provider initialized - Region: {os.getenv('AWS_REGION')} - FIPS endpoint: {use_fips}"
             )
         except Exception as e:
             logger.error(f"[KMS] Error initializing AWS KMS: {e}")
             raise
 
     def generate_data_key(self, key_id: str, tenant_id: str) -> Tuple[bytes, bytes]:
-        """Generate tenant-specific data key via AWS KMS."""
+        """
+        Generate tenant-specific data key via AWS KMS.
+
+        `key_id` (e.g. "primary" from register_tenant()) is another of
+        LocalKMSProvider's internal naming conventions, not a real AWS KMS
+        key -- same issue and same fix as sign_data()/verify_signature()
+        above: always derive from the one shared master key, per the
+        one-shared-signing-key decision extended consistently to
+        encryption too.
+        """
         try:
             response = self.kms.generate_data_key(
-                KeyId=key_id or self.master_key_id,
+                KeyId=self.master_key_id,
                 KeySpec="AES_256",
                 EncryptionContext={"tenant_id": tenant_id, "purpose": "data_encryption"},
             )
@@ -176,10 +198,22 @@ class AWSKMSProvider(KMSProvider):
             raise
 
     def sign_data(self, data: bytes, key_id: str) -> bytes:
-        """Sign using AWS KMS RSA key."""
+        """
+        Sign using AWS KMS RSA key.
+
+        `key_id` (e.g. "tenant_abc123") is LocalKMSProvider's own internal
+        naming convention for its per-tenant key store -- not a real AWS
+        KMS key identifier, and AWS would reject it outright as an
+        invalid KeyId. 2026-08 government-readiness decision: one shared
+        KMS signing key for every tenant (not one real KMS key per tenant
+        -- simpler, and CGC Core's differentiator is the non-repudiable
+        signature on the decision itself, not per-customer key isolation),
+        so every call resolves to self.master_key_id regardless of what
+        the caller passed.
+        """
         try:
             response = self.kms.sign(
-                KeyId=key_id,
+                KeyId=self.master_key_id,
                 Message=data,
                 SigningAlgorithm="RSASSA_PSS_SHA_256",
                 MessageFormat="RAW",
@@ -191,10 +225,10 @@ class AWSKMSProvider(KMSProvider):
             raise
 
     def verify_signature(self, data: bytes, signature: bytes, key_id: str) -> bool:
-        """Verify signature in AWS KMS."""
+        """Verify signature in AWS KMS. See sign_data() -- key_id is ignored, same reason."""
         try:
             response = self.kms.verify(
-                KeyId=key_id,
+                KeyId=self.master_key_id,
                 Message=data,
                 Signature=signature,
                 SigningAlgorithm="RSASSA_PSS_SHA_256",
