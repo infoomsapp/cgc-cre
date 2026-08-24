@@ -15,14 +15,13 @@ so this file has no auth logic of its own.
 
 import os
 import logging
-import time
-from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.Core.db.database import get_database
+from app.modules.guard.rate_limiter import check_rate_limit
 
 logger = logging.getLogger("cgc.monitor")
 
@@ -31,29 +30,18 @@ router = APIRouter()
 ALLOWED_APP_SOURCES = {"ledgiproof", "ledgiproof-tax-pro"}
 ALLOWED_SEVERITIES  = {"info", "warning", "error", "critical"}
 
-# ─────────────────────────────────────────────────────────────────────────
-#  Rate limiting — POST /error was confirmed unbounded during a live pentest
-#  (15 concurrent requests, each a distinct fingerprint, all 200'd -- every
-#  caller shares one bearer token, so nothing before this stopped a leaked
-#  key, or a buggy client in a retry loop, from growing the table forever).
-#  In-memory sliding window, keyed by client IP. Not distributed across
-#  Vercel's serverless instances -- a real fix at this project's current
-#  scale would need Redis or a Postgres-backed counter -- but it caps abuse
-#  within any single warm instance, which is a real improvement over zero.
-# ─────────────────────────────────────────────────────────────────────────
+# Rate limiting — POST /error was confirmed unbounded during a live pentest
+# (15 concurrent requests, each a distinct fingerprint, all 200'd -- every
+# caller shares one bearer token, so nothing before this stopped a leaked
+# key, or a buggy client in a retry loop, from growing the table forever).
+# 2026-08-23: migrated from an in-memory per-instance deque (the one
+# remaining holdout of that bug class -- everything else in this codebase
+# already moved to this same Postgres-backed limiter) to
+# app.modules.guard.rate_limiter.check_rate_limit, real across every
+# Vercel instance, not just the one warm process that happened to serve
+# the request. Same 20-per-60s ceiling as before.
 _RATE_LIMIT  = 20     # requests
-_RATE_WINDOW = 60.0   # seconds
-_rate_state: Dict[str, deque] = defaultdict(deque)
-
-def _check_rate_limit(key: str) -> bool:
-    now = time.monotonic()
-    window = _rate_state[key]
-    while window and window[0] < now - _RATE_WINDOW:
-        window.popleft()
-    if len(window) >= _RATE_LIMIT:
-        return False
-    window.append(now)
-    return True
+_RATE_WINDOW = 60     # seconds
 
 
 class ErrorReportIn(BaseModel):
@@ -72,7 +60,7 @@ class ErrorReportIn(BaseModel):
 @router.post("/error", summary="Ingest a client error report")
 async def report_error(payload: ErrorReportIn, request: Request) -> Dict[str, Any]:
     client_ip = request.client.host if request.client else "unknown"
-    if not _check_rate_limit(client_ip):
+    if not check_rate_limit(f"monitor:{client_ip}", _RATE_LIMIT, _RATE_WINDOW):
         raise HTTPException(status_code=429, detail="Too many error reports — slow down")
 
     if payload.app_source not in ALLOWED_APP_SOURCES:
