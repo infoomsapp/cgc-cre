@@ -485,6 +485,45 @@ async def trace_execution(request: Request, call_next: Any) -> Any:
     return response
 
 # =========================
+# SECURITY HEADERS
+# =========================
+# 2026-08-24: this app had zero response security headers before this --
+# no CSP, no clickjacking protection, no HSTS. The dashboards' inline
+# <script> blocks (each dashboard HTML file is one self-contained page,
+# no separate JS bundle to point a nonce/hash at) mean the CSP below
+# still needs 'unsafe-inline' for script-src/style-src rather than a
+# strict nonce policy -- a real gap, not hidden here, but frame-ancestors
+# 'none' + object-src 'none' + a locked-down connect/script origin list
+# still closes off clickjacking, plugin-based injection, and exfil to
+# any host other than this app and the one CDN the dashboards load
+# ApexCharts from.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "object-src 'none'; "
+    "form-action 'self'"
+)
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next: Any) -> Any:
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=(), payment=()"
+    response.headers["Content-Security-Policy"] = _CSP
+    # Vercel terminates TLS and is HTTPS-only, so this is safe to send
+    # unconditionally (no plain-HTTP deployment target for this app).
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+# =========================
 # HEALTH + GOVERNANCE
 # =========================
 @app.get("/health", tags=["System"])
