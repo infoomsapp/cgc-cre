@@ -58,8 +58,7 @@
   #gate .linkBtn:hover { color: var(--text); }
   #gate .tokenRow { display: none; flex-direction: column; gap: 10px; margin-top: 12px; }
   #gate .tokenRow.show { display: flex; }
-  #gate .gateLogo { display: block; width: 100%; max-width: 200px; height: auto; margin: 0 auto 10px; }
-  #gate .gateSection { text-align: center; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; margin: 0 0 18px; }
+  #gate .gateLogo { display: block; width: 100%; max-width: 220px; height: auto; }
   .brandRow { display: flex; align-items: center; gap: 9px; }
   .brandIcon { width: 24px; height: 24px; display: block; flex-shrink: 0; }
   #app { display: none; max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; }
@@ -113,10 +112,8 @@
 <body>
 
 <div id="gate">
+  <img src="/static/img/cgc_logo.png" alt="CGC Core" class="gateLogo">
   <div class="card">
-    <img src="/static/img/cgc_logo.png" alt="CGC Core" class="gateLogo">
-    <p class="gateSection">Home</p>
-    <p>Sign in with your CGC Core account.</p>
     <form id="loginForm">
       <input id="emailInput" type="email" placeholder="Email" autocomplete="username" required>
       <input id="passwordInput" type="password" placeholder="Password" autocomplete="current-password" required>
