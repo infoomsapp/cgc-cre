@@ -1,3 +1,9 @@
 -r requirements.txt
 pytest==8.3.4
 pytest-asyncio==0.25.2
+# Turns each pytest failure into a real GitHub Actions annotation (file,
+# line, message) visible via the Checks API -- added specifically because
+# this repo's raw Actions logs 403 without authentication, which made two
+# real CI failures unreadable and had to be root-caused by reproducing the
+# whole CI environment locally in Docker instead.
+pytest-github-actions-annotate-failures==0.3.0
