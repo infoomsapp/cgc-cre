@@ -62,8 +62,17 @@ class AuthSystem:
         env_secret = os.getenv("JWT_SECRET")
         self.jwt_secret = jwt_secret or env_secret
         if not self.jwt_secret:
-            # For dev only: generate ephemeral secret
-            self.jwt_secret = self._generate_secret()
+            # For dev only: generate ephemeral secret. Was
+            # self._generate_secret() -- a method that never existed on
+            # this class, so this fallback path AttributeError'd instead
+            # of degrading gracefully, every single time JWT_SECRET was
+            # ever actually unset. Never noticed before because every
+            # environment this code has run in (production, every local
+            # dev session) always had JWT_SECRET set -- first caught by
+            # this project's CI, the first environment to genuinely not
+            # set it. `secrets` is already imported; no need for a
+            # dedicated method for a one-time fallback value.
+            self.jwt_secret = secrets.token_urlsafe(48)
             print(" JWT_SECRET not set. Using ephemeral secret (dev only).")
 
         self.jwt_algorithms = allowed_algorithms or ["HS256"]
