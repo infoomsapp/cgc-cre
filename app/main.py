@@ -15,7 +15,7 @@ from typing import Annotated, Any, Final, Optional, Dict, List
 from time import perf_counter_ns
 
 from fastapi import FastAPI, Depends, Request, Header, status, Form, Query
-from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, Response, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, ConfigDict
 from fastapi.staticfiles import StaticFiles
@@ -544,6 +544,33 @@ _DASHBOARD_HOME_HTML = (Path(__file__).parent / "static" / "dashboard_home.html"
 _DASHBOARD_GOVERNANCE_HTML = (Path(__file__).parent / "static" / "dashboard_governance.html").read_text(encoding="utf-8")
 _DASHBOARD_SCORING_HTML = (Path(__file__).parent / "static" / "dashboard_scoring.html").read_text(encoding="utf-8")
 _DASHBOARD_SECURITY_HTML = (Path(__file__).parent / "static" / "dashboard_security.html").read_text(encoding="utf-8")
+
+# 2026-08-24: the one deliberate exception to "no shared-asset routes" above
+# -- the real CGC-core brand mark (cropped/chroma-keyed to a transparent PNG
+# from the source cgc_logo.jpg at the repo root), shared across all 4
+# dashboards rather than base64-duplicated into every self-contained HTML
+# file. NOT an app.mount(StaticFiles(...)) -- confirmed live (TestClient,
+# isolated repro) that this app's root_path="/api/v1" (set on CGCCoreEngine
+# above, for correct OpenAPI/Swagger URLs behind Vercel) breaks Starlette
+# Mount route resolution specifically, while every plain @app.get route is
+# unaffected. Explicit routes below use the exact same mechanism every
+# other working route in this file already does, sidestepping that
+# interaction instead of touching the app-wide root_path config for a
+# purely additive asset.
+_IMG_DIR = Path(__file__).parent / "static" / "img"
+
+@app.get("/static/img/{filename}", tags=["System"], include_in_schema=False)
+async def static_img(filename: str) -> FileResponse:
+    # Fixed allowlist, not a raw filesystem join -- filename is caller
+    # input and this route has no other validation, so path traversal
+    # (`../../...`) must be structurally impossible, not merely checked.
+    allowed = {
+        "cgc_logo.png", "cgc_icon.png",
+        "cgc_favicon_32.png", "cgc_favicon_64.png", "cgc_favicon_180.png",
+    }
+    if filename not in allowed:
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(_IMG_DIR / filename, media_type="image/png")
 
 @app.get("/dashboard", tags=["System"], response_class=HTMLResponse)
 async def dashboard() -> HTMLResponse:

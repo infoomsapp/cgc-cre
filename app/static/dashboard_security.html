@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CGC Core — Security</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/img/cgc_favicon_32.png">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/img/cgc_favicon_64.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/img/cgc_favicon_180.png">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.54.1/dist/apexcharts.min.js"></script>
 <style>
   :root {
@@ -56,6 +59,10 @@
   #gate .linkBtn:hover { color: var(--text); }
   #gate .tokenRow { display: none; flex-direction: column; gap: 10px; margin-top: 12px; }
   #gate .tokenRow.show { display: flex; }
+  #gate .gateLogo { display: block; width: 100%; max-width: 200px; height: auto; margin: 0 auto 10px; }
+  #gate .gateSection { text-align: center; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; margin: 0 0 18px; }
+  .brandRow { display: flex; align-items: center; gap: 9px; }
+  .brandIcon { width: 24px; height: 24px; display: block; flex-shrink: 0; }
   #app { display: none; max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; }
   header.top {
     display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
@@ -120,7 +127,8 @@
 
 <div id="gate">
   <div class="card">
-    <h1>CGC Core — Security</h1>
+    <img src="/static/img/cgc_logo.png" alt="CGC Core" class="gateLogo">
+    <p class="gateSection">Security</p>
     <p>Sign in with your CGC Core account.</p>
     <form id="loginForm">
       <input id="emailInput" type="email" placeholder="Email" autocomplete="username" required>
@@ -139,9 +147,12 @@
 
 <div id="app">
   <header class="top">
-    <div>
-      <h1>CGC Core — Security</h1>
-      <div class="sub">cgc-cre.vercel.app</div>
+    <div class="brandRow">
+      <img src="/static/img/cgc_icon.png" alt="" class="brandIcon">
+      <div>
+        <h1>CGC Core — Security</h1>
+        <div class="sub">cgc-cre.vercel.app</div>
+      </div>
     </div>
     <div class="right">
       <span id="dot"></span>
