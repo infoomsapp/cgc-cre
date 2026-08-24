@@ -43,4 +43,13 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run tests
-        run: pytest -v
+        # python -m pytest, not bare `pytest` -- the -m form prepends the
+        # current working directory (the repo root) to sys.path, which is
+        # what makes `from app...` importable. The bare `pytest` entry
+        # point relies on pytest's own file-relative rootdir insertion
+        # instead, which (with no tests/__init__.py) inserts tests/ itself,
+        # not the repo root -- ModuleNotFoundError: No module named 'app'
+        # on every collection, every time, found live reproducing this
+        # exact CI environment (Linux, Python 3.12) in Docker after two
+        # real CI failures.
+        run: python -m pytest -v
