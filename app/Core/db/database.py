@@ -870,41 +870,49 @@ class Database:
                     ON cgc_pod.inference_intercepts (decision_id, tenant_id)
                 """)
 
-                # NOTE: this table already existed in the real database
-                # before this method was ever written (confirmed live via
-                # information_schema) -- IF NOT EXISTS makes this a no-op
-                # here. Its real columns differ from what's declared below
-                # (tenant_id/intercept_id/decision_id are UUID, plus extra
-                # block_id/merkle_root/last_verified_at columns) -- see
-                # pod_repository.py's _ledger_uid() for how the app
-                # reconciles its string-based IDs with that. Left as
-                # documentation of the shape a fresh database would get;
-                # never actually executes against this project's DB.
+                # This table already existed in the real database before this
+                # method was ever written (confirmed live via
+                # information_schema) -- IF NOT EXISTS made this a
+                # permanent no-op in production, so the CREATE TABLE below
+                # went untested against a real fresh database for the
+                # project's entire history. 2026-08-23's first-ever CI run
+                # (a genuinely empty Postgres) proved that "never actually
+                # executes" was false: it does, on a fresh database, and
+                # the previous version here (TEXT ids, a FK to
+                # inference_intercepts that the real table doesn't have,
+                # no block_id) would have created a table incompatible
+                # with pod_repository.py -- which only ever worked against
+                # the real pre-existing structure. Rewritten to match that
+                # real structure exactly (re-verified live via
+                # information_schema + pg_constraint before writing this),
+                # not the original guess. block_uuid/tenant_id/intercept_id/
+                # decision_id are UUID because pod_repository.py's
+                # _ledger_uid() always converts the app's string ids before
+                # writing -- see that function's own docstring.
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS cgc_pod.pod_ledger (
-                        block_uuid            TEXT PRIMARY KEY,
-                        tenant_id             TEXT NOT NULL,
-                        intercept_id          TEXT NOT NULL REFERENCES cgc_pod.inference_intercepts(intercept_id),
-                        decision_id           TEXT NOT NULL,
-                        block_number          INT NOT NULL,
-                        previous_block_hash   TEXT NOT NULL,
-                        block_hash            TEXT NOT NULL UNIQUE,
-                        triplet_hash          TEXT NOT NULL,
-                        governance_outcome    TEXT NOT NULL,
+                        block_id              BIGSERIAL PRIMARY KEY,
+                        block_uuid            UUID NOT NULL UNIQUE,
+                        tenant_id             UUID NOT NULL,
+                        intercept_id          UUID NOT NULL,
+                        decision_id           UUID NOT NULL,
+                        block_number          BIGINT NOT NULL,
+                        previous_block_hash   VARCHAR NOT NULL,
+                        block_hash            VARCHAR NOT NULL UNIQUE,
+                        merkle_root           VARCHAR,
+                        triplet_hash          VARCHAR NOT NULL,
+                        governance_outcome    VARCHAR NOT NULL,
                         compliance_score      NUMERIC,
-                        chain_height          INT,
-                        sealed_at             TIMESTAMPTZ NOT NULL,
-                        sealed_by             TEXT NOT NULL,
-                        tamper_detected       BOOLEAN NOT NULL DEFAULT FALSE
+                        chain_height          BIGINT NOT NULL,
+                        sealed_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        sealed_by             VARCHAR NOT NULL,
+                        tamper_detected       BOOLEAN NOT NULL DEFAULT FALSE,
+                        last_verified_at      TIMESTAMPTZ
                     )
                 """)
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_ledger_tenant_block
                     ON cgc_pod.pod_ledger (tenant_id, block_number)
-                """)
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_ledger_decision
-                    ON cgc_pod.pod_ledger (decision_id, tenant_id)
                 """)
                 # Best-effort defense-in-depth: the real fix for concurrent/
                 # cold-start block numbering is the per-tenant advisory lock
