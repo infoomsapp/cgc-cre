@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CGC Core — Governance</title>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.54.1/dist/apexcharts.min.js"></script>
 <style>
   :root {
     --bg: #0b0f0e;
@@ -148,12 +149,9 @@
           <button class="active" data-app="ledgiproof" onclick="setVolApp(this)">LedgiProof</button>
           <button data-app="ledgiproof-tax-pro" onclick="setVolApp(this)">Tax Pro</button>
         </div>
-        <div class="chartLegend">
-          <span class="lg"><span class="sw" style="background:var(--verified-blue)"></span>Approved</span>
-          <span class="lg"><span class="sw" style="background:var(--amber)"></span>Other outcome</span>
-        </div>
       </div>
       <div id="volChart"></div>
+      <div class="empty" id="volChartEmpty" style="display:none"></div>
     </div>
   </section>
 
@@ -225,63 +223,109 @@ function setVolApp(btn) {
   loadVolumeChart();
 }
 
-function renderStackedBarChart(buckets, hours) {
-  // Builds a continuous hour axis (fills gaps with 0) so a quiet hour reads
-  // as a real gap in activity, not a missing data point -- see
-  // TCO.get_decision_timeseries()'s docstring for why the API itself
-  // doesn't zero-fill server-side.
+// Fixed categorical colors, matching this page's own tokens -- Apex needs
+// real hex values, not CSS custom properties. Approved reuses LedgiProof's
+// "Certification Blue" (see :root comment above); Other stays amber.
+const CHART_COLORS = {
+  verifiedBlue: '#2563eb', amber: '#e8b454', accent: '#4fd8a8',
+  red: '#ea8a78', muted: '#7d9089', text: '#e6efe9', border: '#253430',
+  panel2: '#171f1c',
+};
+
+function hourAxis(hours) {
   const now = new Date(); now.setUTCMinutes(0, 0, 0, 0);
   const axis = [];
   for (let i = hours - 1; i >= 0; i--) axis.push(new Date(now.getTime() - i * 3600000));
-  const byHour = {};
-  (buckets || []).forEach(b => { byHour[new Date(b.bucket).getTime()] = b; });
+  return axis;
+}
 
-  const W = 720, H = 170, padT = 8, padB = 20;
-  const chartH = H - padT - padB;
-  const n = axis.length;
-  const slot = W / n;
-  const barW = Math.max(2, slot - 3);
-  const maxTotal = Math.max(1, ...axis.map(d => (byHour[d.getTime()] || {}).total || 0));
+let volChartInstance = null;
 
-  let bars = '';
-  axis.forEach((d, i) => {
-    const b = byHour[d.getTime()];
-    const total = b ? b.total : 0;
-    const approved = b ? b.approved : 0;
-    const other = total - approved;
-    const x = i * slot + (slot - barW) / 2;
-    const hApproved = total ? Math.max((approved / maxTotal) * chartH, approved > 0 ? 2 : 0) : 0;
-    const hOther = total ? (other / maxTotal) * chartH : 0;
-    const yApproved = padT + chartH - hApproved;
-    const yOther = yApproved - hOther;
-    const label = `${d.toISOString().slice(11, 16)} UTC — ${total} decision${total === 1 ? '' : 's'}${total ? `, ${approved} approved` : ''}`;
-    if (total === 0) {
-      bars += `<rect x="${x.toFixed(1)}" y="${(padT + chartH - 1).toFixed(1)}" width="${barW}" height="1" fill="var(--border)"><title>${esc(label)}</title></rect>`;
-    } else {
-      if (hOther > 0) bars += `<rect x="${x.toFixed(1)}" y="${yOther.toFixed(1)}" width="${barW}" height="${hOther.toFixed(1)}" fill="var(--amber)" rx="1"><title>${esc(label)}</title></rect>`;
-      bars += `<rect x="${x.toFixed(1)}" y="${yApproved.toFixed(1)}" width="${barW}" height="${hApproved.toFixed(1)}" fill="var(--verified-blue)" rx="1"><title>${esc(label)}</title></rect>`;
-    }
-  });
-
-  const tickEvery = Math.max(1, Math.round(n / 8));
-  let ticks = '';
-  axis.forEach((d, i) => {
-    if (i % tickEvery !== 0) return;
-    const x = i * slot + slot / 2;
-    ticks += `<text x="${x.toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="var(--muted)" font-family="var(--mono)">${d.toISOString().slice(11, 13)}h</text>`;
-  });
-
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${bars}${ticks}</svg>`;
+function apexBaseOptions(extra) {
+  return Object.assign({
+    chart: {
+      background: 'transparent', foreColor: CHART_COLORS.muted,
+      toolbar: { show: false }, zoom: { enabled: false },
+      fontFamily: 'var(--sans)',
+    },
+    theme: { mode: 'dark' },
+    grid: { borderColor: CHART_COLORS.border, strokeDashArray: 3, padding: { left: 8, right: 8 } },
+    tooltip: {
+      theme: 'dark',
+      style: { fontFamily: 'var(--mono)', fontSize: '11.5px' },
+      x: { format: 'HH:mm' },
+    },
+    legend: {
+      position: 'top', horizontalAlign: 'right', fontFamily: 'var(--mono)',
+      fontSize: '11px', labels: { colors: CHART_COLORS.muted }, markers: { size: 5 },
+      itemMargin: { horizontal: 10 },
+    },
+    xaxis: {
+      type: 'datetime',
+      labels: { style: { colors: CHART_COLORS.muted, fontSize: '9.5px', fontFamily: 'var(--mono)' }, datetimeUTC: true },
+      axisBorder: { color: CHART_COLORS.border }, axisTicks: { color: CHART_COLORS.border },
+    },
+    yaxis: {
+      labels: { style: { colors: CHART_COLORS.muted, fontSize: '9.5px', fontFamily: 'var(--mono)' } },
+    },
+  }, extra);
 }
 
 async function loadVolumeChart() {
+  const el = document.getElementById('volChart');
+  const emptyEl = document.getElementById('volChartEmpty');
   try {
     const data = await api(`/governance/timeseries/${volApp}?hours=24`);
-    document.getElementById('volChart').innerHTML = (data.buckets && data.buckets.length)
-      ? renderStackedBarChart(data.buckets, 24)
-      : '<div class="empty">No decisions in the last 24h</div>';
+    const buckets = data.buckets || [];
+    if (!buckets.length) {
+      el.style.display = 'none';
+      emptyEl.style.display = 'block';
+      emptyEl.textContent = 'No decisions in the last 24h';
+      return;
+    }
+    el.style.display = 'block';
+    emptyEl.style.display = 'none';
+
+    // Zero-fills the continuous hour axis so a quiet hour reads as a real
+    // gap in activity, not a missing data point -- see
+    // TCO.get_decision_timeseries()'s docstring for why the API itself
+    // doesn't zero-fill server-side.
+    const axis = hourAxis(24);
+    const byHour = {};
+    buckets.forEach(b => { byHour[new Date(b.bucket).getTime()] = b; });
+    const approved = [], other = [];
+    axis.forEach(d => {
+      const b = byHour[d.getTime()];
+      const total = b ? b.total : 0;
+      const app = b ? b.approved : 0;
+      approved.push([d.getTime(), app]);
+      other.push([d.getTime(), total - app]);
+    });
+
+    const options = apexBaseOptions({
+      series: [
+        { name: 'Approved', data: approved },
+        { name: 'Other outcome', data: other },
+      ],
+      chart: Object.assign({ type: 'bar', height: 220, stacked: true, animations: { speed: 250 } }, apexBaseOptions({}).chart),
+      colors: [CHART_COLORS.verifiedBlue, CHART_COLORS.amber],
+      plotOptions: { bar: { columnWidth: '65%', borderRadius: 2 } },
+      dataLabels: { enabled: false },
+      xaxis: Object.assign({}, apexBaseOptions({}).xaxis, {
+        tickAmount: 8,
+        labels: Object.assign({}, apexBaseOptions({}).xaxis.labels, { format: 'HH:mm' }),
+      }),
+      tooltip: Object.assign({}, apexBaseOptions({}).tooltip, {
+        y: { formatter: (v) => `${v} decision${v === 1 ? '' : 's'}` },
+      }),
+    });
+
+    if (volChartInstance) { await volChartInstance.updateOptions(options); }
+    else { volChartInstance = new ApexCharts(el, options); await volChartInstance.render(); }
   } catch (e) {
-    document.getElementById('volChart').innerHTML = `<div class="empty">Chart unavailable: ${esc(e.message)}</div>`;
+    el.style.display = 'none';
+    emptyEl.style.display = 'block';
+    emptyEl.textContent = `Chart unavailable: ${e.message}`;
   }
 }
 

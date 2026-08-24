@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CGC Core — Security</title>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.54.1/dist/apexcharts.min.js"></script>
 <style>
   :root {
     --bg: #0b0f0e;
@@ -145,13 +146,9 @@
     <div class="chartCard">
       <div class="chartHead">
         <span class="sub">Hourly counts, real per-event data</span>
-        <div class="chartLegend">
-          <span class="lg"><span class="sw" style="background:var(--red)"></span>Suspicious payloads</span>
-          <span class="lg"><span class="sw" style="background:var(--amber)"></span>Internal flags</span>
-          <span class="lg"><span class="sw" style="background:var(--muted)"></span>Failed logins</span>
-        </div>
       </div>
       <div id="guardChart"></div>
+      <div class="empty" id="guardChartEmpty" style="display:none"></div>
     </div>
   </section>
 
@@ -233,56 +230,85 @@ function esc(s) {
 }
 
 // ---- Guard events chart (real hourly data from GET /guard/activity/timeseries) ----
-function renderGuardLineChart(buckets, hours) {
-  const series = [
-    { key: 'suspicious_payloads', color: 'var(--red)' },
-    { key: 'internal_flags', color: 'var(--amber)' },
-    { key: 'failed_logins', color: 'var(--muted)' },
-  ];
+// Fixed colors matching this page's own tokens -- red/amber/muted here are
+// a deliberate severity-flavored identity set for these 3 specific signal
+// types (payload attack attempts / internal anomalies / auth failures),
+// not a reuse of a reserved status palette.
+const GUARD_COLORS = { red: '#ea8a78', amber: '#e8b454', muted: '#7d9089', border: '#253430' };
+
+function hourAxis(hours) {
   const now = new Date(); now.setUTCMinutes(0, 0, 0, 0);
   const axis = [];
   for (let i = hours - 1; i >= 0; i--) axis.push(new Date(now.getTime() - i * 3600000));
-  const byHour = {};
-  (buckets || []).forEach(b => { byHour[new Date(b.bucket).getTime()] = b; });
-
-  const W = 720, H = 150, padT = 10, padB = 20;
-  const chartH = H - padT - padB;
-  const n = axis.length;
-  const maxVal = Math.max(1, ...axis.map(d => {
-    const b = byHour[d.getTime()];
-    return b ? Math.max(b.suspicious_payloads || 0, b.internal_flags || 0, b.failed_logins || 0) : 0;
-  }));
-
-  const lines = series.map(s => {
-    const pts = axis.map((d, i) => {
-      const b = byHour[d.getTime()];
-      const v = b ? (b[s.key] || 0) : 0;
-      const x = n > 1 ? (i / (n - 1)) * W : 0;
-      const y = padT + chartH - (v / maxVal) * chartH;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
-    return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.75"/>`;
-  }).join('');
-
-  const tickEvery = Math.max(1, Math.round(n / 8));
-  let ticks = '';
-  axis.forEach((d, i) => {
-    if (i % tickEvery !== 0) return;
-    const x = n > 1 ? (i / (n - 1)) * W : 0;
-    ticks += `<text x="${x.toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="var(--muted)" font-family="var(--mono)">${d.toISOString().slice(11, 13)}h</text>`;
-  });
-
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${lines}${ticks}</svg>`;
+  return axis;
 }
 
+let guardChartInstance = null;
+
 async function loadGuardChart() {
+  const el = document.getElementById('guardChart');
+  const emptyEl = document.getElementById('guardChartEmpty');
   try {
     const data = await api('/guard/activity/timeseries?hours=24');
-    document.getElementById('guardChart').innerHTML = (data.buckets && data.buckets.length)
-      ? renderGuardLineChart(data.buckets, 24)
-      : '<div class="empty">No guard events in the last 24h</div>';
+    const buckets = data.buckets || [];
+    if (!buckets.length) {
+      el.style.display = 'none';
+      emptyEl.style.display = 'block';
+      emptyEl.textContent = 'No guard events in the last 24h';
+      return;
+    }
+    el.style.display = 'block';
+    emptyEl.style.display = 'none';
+
+    const axis = hourAxis(24);
+    const byHour = {};
+    buckets.forEach(b => { byHour[new Date(b.bucket).getTime()] = b; });
+    const seriesKeys = [
+      { key: 'suspicious_payloads', name: 'Suspicious payloads' },
+      { key: 'internal_flags', name: 'Internal flags' },
+      { key: 'failed_logins', name: 'Failed logins' },
+    ];
+    const series = seriesKeys.map(s => ({
+      name: s.name,
+      data: axis.map(d => [d.getTime(), (byHour[d.getTime()] || {})[s.key] || 0]),
+    }));
+
+    const options = {
+      series,
+      chart: {
+        type: 'line', height: 200, background: 'transparent', foreColor: GUARD_COLORS.muted,
+        toolbar: { show: false }, zoom: { enabled: false }, fontFamily: 'var(--sans)',
+        animations: { speed: 250 },
+      },
+      theme: { mode: 'dark' },
+      colors: [GUARD_COLORS.red, GUARD_COLORS.amber, GUARD_COLORS.muted],
+      stroke: { width: 2, curve: 'smooth' },
+      markers: { size: 0, hover: { size: 4 } },
+      grid: { borderColor: GUARD_COLORS.border, strokeDashArray: 3, padding: { left: 8, right: 8 } },
+      dataLabels: { enabled: false },
+      legend: {
+        position: 'top', horizontalAlign: 'right', fontFamily: 'var(--mono)',
+        fontSize: '11px', labels: { colors: GUARD_COLORS.muted }, markers: { size: 5 },
+        itemMargin: { horizontal: 10 },
+      },
+      xaxis: {
+        type: 'datetime', tickAmount: 8,
+        labels: { format: 'HH:mm', style: { colors: GUARD_COLORS.muted, fontSize: '9.5px', fontFamily: 'var(--mono)' }, datetimeUTC: true },
+        axisBorder: { color: GUARD_COLORS.border }, axisTicks: { color: GUARD_COLORS.border },
+      },
+      yaxis: {
+        labels: { style: { colors: GUARD_COLORS.muted, fontSize: '9.5px', fontFamily: 'var(--mono)' } },
+        min: 0,
+      },
+      tooltip: { theme: 'dark', style: { fontFamily: 'var(--mono)', fontSize: '11.5px' }, x: { format: 'HH:mm' } },
+    };
+
+    if (guardChartInstance) { await guardChartInstance.updateOptions(options); }
+    else { guardChartInstance = new ApexCharts(el, options); await guardChartInstance.render(); }
   } catch (e) {
-    document.getElementById('guardChart').innerHTML = `<div class="empty">Chart unavailable: ${esc(e.message)}</div>`;
+    el.style.display = 'none';
+    emptyEl.style.display = 'block';
+    emptyEl.textContent = `Chart unavailable: ${e.message}`;
   }
 }
 
