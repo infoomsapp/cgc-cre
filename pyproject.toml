@@ -8,3 +8,7 @@ version = "0.1.0"
 description = "CGC Core Engine"
 authors = [{name="Olympus Mont Systems LLC"}]
 dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
