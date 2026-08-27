@@ -27,7 +27,7 @@ logger = logging.getLogger("cgc.monitor")
 
 router = APIRouter()
 
-ALLOWED_APP_SOURCES = {"ledgiproof", "ledgiproof-tax-pro"}
+ALLOWED_APP_SOURCES = {"ledgiproof", "ledgiproof-tax-pro", "controlmiles"}
 ALLOWED_SEVERITIES  = {"info", "warning", "error", "critical"}
 
 # Rate limiting — POST /error was confirmed unbounded during a live pentest
