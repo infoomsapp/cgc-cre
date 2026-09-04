@@ -31,12 +31,27 @@ def db():
     The real Database() singleton, pointed at the test Postgres.
     Skips every test that depends on this fixture if no test DB is
     reachable, instead of erroring the whole collection.
+
+    SPEED FIX (2026-09-04): Database.__init__() no longer creates its own
+    schema on every instantiation (production cold-start fix -- see
+    database.py's own header comment on that change). CI's test Postgres
+    is a fresh throwaway container with nothing in it yet, so this fixture
+    now does explicitly, once per test session, what __init__ used to do
+    on every boot -- the same real gap scripts/run_schema_migrations.py
+    exists to cover for bootstrapping a fresh production environment.
     """
     from app.Core.db.database import get_database
 
     database = get_database()
     if not database.use_postgres:
         pytest.skip("No test Postgres reachable (set TEST_DATABASE_URL) -- skipping DB-backed tests")
+
+    database._create_tables()
+    database._create_jla_schema()
+    database._create_pod_schema()
+    database._create_tco_schema()
+    database._create_guard_schema()
+    database._create_auth_schema()
     return database
 
 

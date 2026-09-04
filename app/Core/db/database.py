@@ -61,28 +61,21 @@ class Database:
         self._app_pool_lock = threading.Lock()
         
         self._init_connection()
-        self._create_tables()
-        self._create_jla_schema()
-        self._create_pod_schema()
-        self._create_tco_schema()
-        self._create_guard_schema()
-        self._create_auth_schema()
-        # _create_rls_policies() is deliberately NOT called here. Found live
-        # (2026-08-23): running it on every cold start adds a full extra
-        # sequential DB round-trip (role check/ALTER + several GRANTs + 8x
-        # ENABLE RLS/DROP POLICY/CREATE POLICY) on top of the 5 schema
-        # methods above, pushing this app's already-serial boot chain past
-        # ~20s locally -- with no vercel.json maxDuration configured, that's
-        # enough to blow the default function timeout, which surfaced as
-        # FUNCTION_INVOCATION_FAILED on *every* route (health included)
-        # during cold starts, not just the ones touching RLS. It's a
-        # one-time migration, not a per-boot invariant like the other
-        # schema methods -- the role/grants/policies already exist in
-        # production (verified live: real cross-tenant isolation test
-        # passed, including the pod_ledger uuid5 policy). Call it manually
-        # (a short script instantiating Database() with this one line
-        # temporarily re-added, or directly) if the policies ever need to
-        # be recreated -- e.g. after adding a new tenant-scoped table.
+        # SPEED FIX (2026-09-04, same category of bug _create_rls_policies()
+        # was already pulled out for on 2026-08-23, just never finished):
+        # this used to also call _create_tables()/_create_jla_schema()/
+        # _create_pod_schema()/_create_tco_schema()/_create_guard_schema()/
+        # _create_auth_schema() -- 6 more one-time schema migrations (53
+        # CREATE TABLE/INDEX statements combined) -- unconditionally on
+        # EVERY cold start, same as the RLS policies were. Every one of
+        # those tables/indexes already exists in production (verified live
+        # via Supabase's own catalog), so this was 6 blocking round-trip
+        # batches of IF-NOT-EXISTS checks paid on every scale-up event for
+        # work that has nothing left to do. Removed for the same reason
+        # _create_rls_policies() already was: it's a one-time migration,
+        # not a per-boot invariant. Run scripts/run_schema_migrations.py
+        # once against a new environment, or after adding a genuinely new
+        # table, instead of paying this on every cold start forever.
 
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'JSON (dev)'}")
 
