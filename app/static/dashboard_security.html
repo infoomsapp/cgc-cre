@@ -418,6 +418,7 @@ async function refresh() {
       <div class="card"><div class="n">${stats.unresolved}</div><div class="l">Unresolved</div></div>
       <div class="card"><div class="n">${(stats.by_app_source && stats.by_app_source.ledgiproof) || 0}</div><div class="l">LedgiProof</div></div>
       <div class="card"><div class="n">${(stats.by_app_source && stats.by_app_source['ledgiproof-tax-pro']) || 0}</div><div class="l">Tax Pro</div></div>
+      <div class="card"><div class="n">${(stats.by_app_source && stats.by_app_source.controlmiles) || 0}</div><div class="l">ControlMiles</div></div>
     `;
 
     selected = new Set([...selected].filter(fp => (errs.reports || []).some(r => r.fingerprint === fp)));

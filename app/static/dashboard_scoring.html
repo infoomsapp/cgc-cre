@@ -315,16 +315,19 @@ function renderFlowCard(appKey, appLabel, data) {
 
 async function refresh() {
   try {
-    const [flowLp, flowLtp] = await Promise.all([
+    const [flowLp, flowLtp, flowCm] = await Promise.all([
       api('/flow-score/ledgiproof'),
       api('/flow-score/ledgiproof-tax-pro'),
+      api('/flow-score/controlmiles'),
     ]);
 
     document.getElementById('flowCards').innerHTML =
       renderFlowCard('ledgiproof', 'LedgiProof', flowLp) +
-      renderFlowCard('ledgiproof-tax-pro', 'LedgiProof Tax Pro', flowLtp);
+      renderFlowCard('ledgiproof-tax-pro', 'LedgiProof Tax Pro', flowLtp) +
+      renderFlowCard('controlmiles', 'ControlMiles', flowCm);
     paintSparkline('ledgiproof');
     paintSparkline('ledgiproof-tax-pro');
+    paintSparkline('controlmiles');
     document.getElementById('dot').style.background = 'var(--green)';
     document.getElementById('gateErr').textContent = '';
 
