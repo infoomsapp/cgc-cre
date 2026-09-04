@@ -4,6 +4,7 @@ Olympus Mont Systems LLC - CGC CORE
 Hardened and integrated with CGC governance concepts.
 """
 
+import hashlib
 import json
 import logging
 import secrets
@@ -55,6 +56,7 @@ class AuthSystem:
         self.users_file = os.path.join(data_dir, "users.json")
         self.sessions_file = os.path.join(data_dir, "sessions.json")
         self.blocked_file = os.path.join(data_dir, "blocked.json")
+        self.api_keys_file = os.path.join(data_dir, "api_keys.json")
 
         self._db = get_database()
 
@@ -98,6 +100,8 @@ class AuthSystem:
             self._save_sessions_json({})
         if not os.path.exists(self.blocked_file):
             self._save_blocked_json({"ips": [], "emails": []})
+        if not os.path.exists(self.api_keys_file):
+            self._save_api_keys_json({})
 
     def _load_users_json(self) -> Dict:
         try:
@@ -149,6 +153,22 @@ class AuthSystem:
                 json.dump(blocked, f, indent=2)
         except Exception as e:
             logger.warning(f"[auth] JSON fallback write failed for blocked.json (non-fatal): {e}")
+
+    def _load_api_keys_json(self) -> Dict:
+        try:
+            with open(self.api_keys_file, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_api_keys_json(self, keys: Dict) -> None:
+        """Same fix as _save_users_json -- see that method's docstring."""
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(self.api_keys_file, "w") as f:
+                json.dump(keys, f, indent=2)
+        except Exception as e:
+            logger.warning(f"[auth] JSON fallback write failed for api_keys.json (non-fatal): {e}")
 
     def _json_is_ip_blocked(self, ip: str, blocked: Dict) -> bool:
         return any(entry.get("ip") == ip for entry in blocked.get("ips", []))
@@ -369,6 +389,109 @@ class AuthSystem:
         return {"ips": len(blocked.get("ips", [])), "emails": len(blocked.get("emails", []))}
 
     # ======================================================================
+    # API KEYS (cgc_auth.api_keys) -- storage primitives, dispatched on
+    # self._db.use_postgres, same pattern as users/sessions/blocklist above.
+    # ======================================================================
+
+    def _insert_api_key(self, key_id: str, app_source: str, key_prefix: str, key_hash: str,
+                         scopes: List[str], created_by: str, created_at: str) -> None:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO cgc_auth.api_keys (id, app_source, key_prefix, key_hash, scopes, created_by, created_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (key_id, app_source, key_prefix, key_hash, scopes, created_by, created_at)
+                )
+                conn.commit()
+            return
+
+        keys = self._load_api_keys_json()
+        keys[key_id] = {
+            "id": key_id, "app_source": app_source, "key_prefix": key_prefix, "key_hash": key_hash,
+            "scopes": scopes, "created_by": created_by, "created_at": created_at,
+            "last_used_at": None, "revoked_at": None,
+        }
+        self._save_api_keys_json(keys)
+
+    def _get_api_key_by_hash(self, key_hash: str) -> Optional[Dict]:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return None
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT * FROM cgc_auth.api_keys WHERE key_hash = %s AND revoked_at IS NULL",
+                    (key_hash,)
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+        for k in self._load_api_keys_json().values():
+            if k.get("key_hash") == key_hash and not k.get("revoked_at"):
+                return k
+        return None
+
+    def _touch_api_key_last_used(self, key_id: str) -> None:
+        """Best-effort, never on the hot auth path's success/failure -- a
+        failed timestamp update must not turn a valid key into a rejected
+        request."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            if self._db.use_postgres:
+                with self._db.get_connection() as conn:
+                    if conn is None:
+                        return
+                    cur = conn.cursor()
+                    cur.execute("UPDATE cgc_auth.api_keys SET last_used_at = %s WHERE id = %s", (now, key_id))
+                    conn.commit()
+                return
+            keys = self._load_api_keys_json()
+            if key_id in keys:
+                keys[key_id]["last_used_at"] = now
+                self._save_api_keys_json(keys)
+        except Exception as e:
+            logger.warning(f"[auth] api key last_used_at update failed (non-fatal): {e}")
+
+    def _list_api_keys_rows(self, app_source: Optional[str] = None) -> List[Dict]:
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return []
+                cur = conn.cursor()
+                if app_source:
+                    cur.execute("SELECT * FROM cgc_auth.api_keys WHERE app_source = %s ORDER BY created_at DESC", (app_source,))
+                else:
+                    cur.execute("SELECT * FROM cgc_auth.api_keys ORDER BY created_at DESC")
+                return [dict(r) for r in cur.fetchall()]
+        rows = list(self._load_api_keys_json().values())
+        if app_source:
+            rows = [r for r in rows if r.get("app_source") == app_source]
+        return sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
+
+    def _revoke_api_key_row(self, key_id: str) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        if self._db.use_postgres:
+            with self._db.get_connection() as conn:
+                if conn is None:
+                    return False
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE cgc_auth.api_keys SET revoked_at = %s WHERE id = %s AND revoked_at IS NULL RETURNING id",
+                    (now, key_id)
+                )
+                revoked = cur.fetchone() is not None
+                conn.commit()
+                return revoked
+        keys = self._load_api_keys_json()
+        if key_id in keys and not keys[key_id].get("revoked_at"):
+            keys[key_id]["revoked_at"] = now
+            self._save_api_keys_json(keys)
+            return True
+        return False
+
+    # ======================================================================
     # PASSWORD HASHING
     # ======================================================================
 
@@ -400,6 +523,80 @@ class AuthSystem:
         """Block IP or email."""
         self._insert_block(ip, email, reason)
         logger.info(f"[auth] blocked: {ip or email} - {reason}")
+
+    # ======================================================================
+    # API KEYS (public) -- Gap 1 of the sellable-service roadmap. Replaces
+    # the single shared CGC_SERVICE_API_KEY (kept working, see verify_token)
+    # with real per-app credentials: each key is bound to exactly one
+    # app_source, cryptographically -- a caller can no longer just declare
+    # a different app_source in the request body and have it trusted (see
+    # main.py/monitor.py/flow_score.py's use of user["app_source"]).
+    #
+    # The plaintext key is returned ONCE, at creation -- only its SHA-256
+    # hash is ever stored (fast, deterministic lookup hash; not a password,
+    # doesn't need bcrypt's slow/salted design -- a 32-byte random key
+    # already has all the entropy a hash needs to protect against brute
+    # force, unlike a human-chosen password).
+    # ======================================================================
+
+    API_KEY_PREFIX = "cgc_live_"
+
+    @staticmethod
+    def _hash_api_key(key: str) -> str:
+        return hashlib.sha256(key.encode()).hexdigest()
+
+    def generate_api_key(self, app_source: str, created_by: str, scopes: Optional[List[str]] = None) -> Dict:
+        """Creates and returns a brand-new key. The plaintext `key` field in
+        this response is the only time it's ever available -- store it now,
+        it can't be recovered later, only revoked and replaced."""
+        plaintext = self.API_KEY_PREFIX + secrets.token_urlsafe(32)
+        key_hash = self._hash_api_key(plaintext)
+        key_id = secrets.token_hex(16)
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        self._insert_api_key(
+            key_id=key_id,
+            app_source=app_source,
+            key_prefix=plaintext[:len(self.API_KEY_PREFIX) + 8],
+            key_hash=key_hash,
+            scopes=scopes or [],
+            created_by=created_by,
+            created_at=created_at,
+        )
+        logger.info(f"[auth] api key issued for app_source={app_source} by {created_by}")
+        return {
+            "success": True,
+            "id": key_id,
+            "app_source": app_source,
+            "key": plaintext,
+            "key_prefix": plaintext[:len(self.API_KEY_PREFIX) + 8],
+            "created_at": created_at,
+        }
+
+    def list_api_keys(self, app_source: Optional[str] = None) -> List[Dict]:
+        """Never includes the plaintext or the hash -- key_prefix is enough
+        for an admin to recognize which key is which."""
+        rows = self._list_api_keys_rows(app_source)
+        return [
+            {
+                "id": r["id"],
+                "app_source": r["app_source"],
+                "key_prefix": r["key_prefix"],
+                "scopes": r.get("scopes") or [],
+                "created_at": r["created_at"],
+                "created_by": r.get("created_by"),
+                "last_used_at": r.get("last_used_at"),
+                "revoked_at": r.get("revoked_at"),
+            }
+            for r in rows
+        ]
+
+    def revoke_api_key(self, key_id: str) -> Dict:
+        revoked = self._revoke_api_key_row(key_id)
+        if not revoked:
+            return {"success": False, "error": "Key not found or already revoked"}
+        logger.info(f"[auth] api key revoked: {key_id}")
+        return {"success": True, "id": key_id}
 
     # ======================================================================
     # USER MANAGEMENT
@@ -541,8 +738,29 @@ class AuthSystem:
         """Verify token and return user info, or None if invalid/expired."""
         # Service-to-service auth: a first-party static API key (LedgiProof, etc.).
         # Constant-time compare; no session or JWT required. Opt-in via env.
+        # LEGACY, kept working during the Gap-1 migration to per-tenant keys
+        # below -- this principal carries no app_source, so every caller
+        # still using it falls back to today's client-declared-app_source
+        # trust model (see main.py/monitor.py/flow_score.py). Once the 3
+        # first-party apps are migrated to their own generate_api_key()
+        # credential, CGC_SERVICE_API_KEY can be unset entirely.
         if self.service_api_key and secrets.compare_digest(str(token), self.service_api_key):
-            return {"email": "service@ledgiproof", "role": "service"}
+            return {"email": "service@ledgiproof", "role": "service", "app_source": None}
+
+        # Per-tenant API key (Gap 1): app_source comes from the credential
+        # itself, not from anything the caller puts in the request -- this
+        # is the real trust boundary a leaked/malicious caller can't cross.
+        if token and token.startswith(self.API_KEY_PREFIX):
+            key_row = self._get_api_key_by_hash(self._hash_api_key(token))
+            if key_row is None:
+                return None
+            self._touch_api_key_last_used(key_row["id"])
+            return {
+                "email": f"apikey@{key_row['app_source']}",
+                "role": "service",
+                "app_source": key_row["app_source"],
+                "api_key_id": key_row["id"],
+            }
 
         session = self._get_session(token)
         if session is None:

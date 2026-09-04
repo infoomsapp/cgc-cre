@@ -472,6 +472,31 @@ async def get_usage(org_id: str, user=Depends(require_admin_or_service)):
     return tenant
 
 # =========================
+# API KEYS (Gap 1 -- per-tenant credentials)
+# =========================
+# require_admin, not require_admin_or_service: unlike billing/cleanup
+# above, issuing a NEW credential must stay human-admin-only -- letting the
+# 'service' principal (itself either the legacy shared key or a per-tenant
+# key) mint more keys would let any existing key holder create keys for
+# ANY app_source, defeating the whole point of binding identity to a key.
+@app.post("/admin/api-keys", tags=["Admin"])
+async def create_api_key(
+    app_source: str = Form(...),
+    scopes: str = Form(""),
+    user=Depends(require_admin),
+) -> Dict[str, Any]:
+    scope_list = [s.strip() for s in scopes.split(",") if s.strip()]
+    return app.auth.generate_api_key(app_source, created_by=user["email"], scopes=scope_list)
+
+@app.get("/admin/api-keys", tags=["Admin"])
+async def list_api_keys(app_source: Optional[str] = None, user=Depends(require_admin)) -> Dict[str, Any]:
+    return {"keys": app.auth.list_api_keys(app_source)}
+
+@app.post("/admin/api-keys/{key_id}/revoke", tags=["Admin"])
+async def revoke_api_key(key_id: str, user=Depends(require_admin)) -> Dict[str, Any]:
+    return app.auth.revoke_api_key(key_id)
+
+# =========================
 # PERFORMANCE TRACING
 # =========================
 @app.middleware("http")
@@ -636,10 +661,19 @@ async def execute_governance_decision(
     """Unified endpoint for executing governance decisions."""
     start_time = perf_counter_ns()
 
-    # Optional with a default (not Form(...)) so any existing caller not
-    # yet sending it keeps working unbroken. Same naming convention as
-    # /monitor/error's app_source, reused here rather than invented fresh.
-    if app_source not in ALLOWED_APP_SOURCES:
+    # Gap 1 (per-tenant API keys): if the caller authenticated with a
+    # per-tenant key, app_source comes from THAT credential -- cryptographically
+    # bound at issuance (AuthSystem.generate_api_key) -- not from this form
+    # field, which is otherwise just whatever the caller typed. A per-tenant
+    # key holder can no longer claim to be a different app_source than the
+    # one its key was issued for. Legacy callers (the shared
+    # CGC_SERVICE_API_KEY, or an admin dashboard session) have no bound
+    # app_source (user["app_source"] is None) and keep today's behavior:
+    # the client-declared value, checked only against the static allowlist.
+    bound_app_source = user.get("app_source")
+    if bound_app_source:
+        app_source = bound_app_source
+    elif app_source not in ALLOWED_APP_SOURCES:
         app_source = "unknown"
 
     # Dual-keyed distributed rate limit: per org_id AND per IP. Either one

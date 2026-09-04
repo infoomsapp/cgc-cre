@@ -63,13 +63,28 @@ async def report_error(payload: ErrorReportIn, request: Request) -> Dict[str, An
     if not check_rate_limit(f"monitor:{client_ip}", _RATE_LIMIT, _RATE_WINDOW):
         raise HTTPException(status_code=429, detail="Too many error reports — slow down")
 
-    if payload.app_source not in ALLOWED_APP_SOURCES:
-        raise HTTPException(status_code=400, detail=f"Unknown app_source: {payload.app_source}")
+    # Gap 1 (per-tenant API keys): the router-level dependency
+    # (dependencies=[Depends(get_current_user)] in main.py) already
+    # verified this request's Bearer token before this handler ever runs --
+    # re-resolving it here (request.app.auth, not importing get_current_user,
+    # which would be a circular import against main.py) only reads the
+    # already-validated principal back out, to bind app_source to it. A
+    # per-tenant key overrides whatever payload.app_source claims; the
+    # legacy shared key (no bound app_source) keeps today's behavior --
+    # trust the payload, checked against the static allowlist below.
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else auth_header
+    principal = request.app.auth.verify_token(token) if (token and request.app.auth) else None
+    bound_app_source = (principal or {}).get("app_source")
+
+    app_source = bound_app_source or payload.app_source
+    if app_source not in ALLOWED_APP_SOURCES:
+        raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
     severity = payload.severity if payload.severity in ALLOWED_SEVERITIES else "error"
 
     db = get_database()
     result = db.save_error_report({
-        "app_source":  payload.app_source,
+        "app_source":  app_source,
         "environment": payload.environment,
         "severity":    severity,
         "message":     payload.message[:2000],

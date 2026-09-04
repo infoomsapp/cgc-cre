@@ -1380,6 +1380,30 @@ class Database:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_blocklist_ip ON cgc_auth.blocklist(ip)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_blocklist_email ON cgc_auth.blocklist(email)")
 
+                # Per-tenant API keys (Gap 1, 2026-09-04): replaces the single
+                # shared CGC_SERVICE_API_KEY as the only way to authenticate.
+                # See AuthSystem.generate_api_key/verify_token -- bound to
+                # app_source, not org_id (org_id stays caller-declared within
+                # an app's own account, app_source is the real boundary).
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_auth.api_keys (
+                        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        app_source    TEXT NOT NULL,
+                        key_prefix    TEXT NOT NULL,
+                        key_hash      TEXT NOT NULL UNIQUE,
+                        scopes        TEXT[] NOT NULL DEFAULT '{}',
+                        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        created_by    TEXT,
+                        last_used_at  TIMESTAMPTZ,
+                        revoked_at    TIMESTAMPTZ
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_api_keys_hash_active
+                    ON cgc_auth.api_keys (key_hash) WHERE revoked_at IS NULL
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_app_source ON cgc_auth.api_keys (app_source)")
+
                 conn.commit()
                 logger.info("cgc_auth schema created/verified")
         except Exception as e:
