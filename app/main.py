@@ -24,6 +24,8 @@ from pathlib import Path
 
 # CGC CORE - Unified Governance System
 from app.Core.tenant.multi_tenant import tenant_manager
+from app.Core.tenant.app_billing import app_billing_manager
+from app.integrations.stripe.billing import StripeBilling, StripeBillingError
 from app.Core.db.database import get_database
 from app.Core.auth.auth_system import AuthSystem
 from app.Core.config import config
@@ -495,6 +497,134 @@ async def list_api_keys(app_source: Optional[str] = None, user=Depends(require_a
 @app.post("/admin/api-keys/{key_id}/revoke", tags=["Admin"])
 async def revoke_api_key(key_id: str, user=Depends(require_admin)) -> Dict[str, Any]:
     return app.auth.revoke_api_key(key_id)
+
+# =========================
+# STRIPE BILLING (Gap 2 -- CGC Core billing ITS OWN tenants, not any of the
+# first-party apps' own end-user billing, which is entirely separate)
+# =========================
+# Cosmetic-only redirect targets, matching the pattern already used for
+# ControlMiles' own Stripe integration -- the real source of truth for
+# whether a subscription is active is always the webhook below, never
+# whatever page the browser lands on after checkout.
+_BILLING_SUCCESS_URL = "https://cgc-cre.vercel.app/dashboard?checkout=success"
+_BILLING_CANCEL_URL = "https://cgc-cre.vercel.app/dashboard?checkout=cancelled"
+
+
+@app.post("/admin/billing/checkout-link", tags=["Billing"])
+async def create_billing_checkout_link(
+    app_source: str = Form(...),
+    plan: str = Form(...),
+    user=Depends(require_admin),
+) -> Dict[str, Any]:
+    """
+    Not self-serve (see the roadmap's own scope note): an admin creates this
+    link on a prospect's behalf and sends it to them -- there's no public
+    signup flow issuing this yet. Reuses an existing Stripe customer for
+    this app_source if app_billing already has one (e.g. a plan change),
+    so the same customer's payment methods/invoice history carry over
+    instead of Stripe treating it as a brand-new customer each time.
+    """
+    if plan.upper() not in tenant_manager.PLAN_QUOTAS or plan.upper() == "FREE":
+        raise HTTPException(status_code=400, detail=f"Not a checkout-eligible plan: {plan}")
+
+    billing = StripeBilling()
+    existing = app_billing_manager.get_billing(app_source)
+    existing_customer_id = existing.get("stripe_customer_id") if existing else None
+
+    try:
+        result = billing.create_checkout_session(
+            app_source=app_source,
+            plan=plan.upper(),
+            success_url=_BILLING_SUCCESS_URL,
+            cancel_url=_BILLING_CANCEL_URL,
+            existing_customer_id=existing_customer_id,
+        )
+    except StripeBillingError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+
+    if not result.get("configured"):
+        return {"configured": False, "reason": "Stripe not configured (STRIPE_SECRET_KEY unset)"}
+    return result
+
+
+@app.get("/admin/billing/portal-link/{app_source}", tags=["Billing"])
+async def create_billing_portal_link(app_source: str, user=Depends(require_admin)) -> Dict[str, Any]:
+    existing = app_billing_manager.get_billing(app_source)
+    if not existing or not existing.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="No Stripe customer on file for this app_source")
+
+    billing = StripeBilling()
+    try:
+        result = billing.create_portal_session(existing["stripe_customer_id"], _BILLING_SUCCESS_URL)
+    except StripeBillingError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+
+    if not result.get("configured"):
+        return {"configured": False, "reason": "Stripe not configured (STRIPE_SECRET_KEY unset)"}
+    return result
+
+
+@app.get("/admin/billing/apps", tags=["Billing"])
+async def list_app_billing(user=Depends(require_admin)) -> Dict[str, Any]:
+    return {"apps": app_billing_manager.list_billing()}
+
+
+@app.post("/billing/webhook", tags=["Billing"])
+async def stripe_webhook(request: Request) -> Dict[str, Any]:
+    """
+    Deliberately NOT behind get_current_user/require_admin -- Stripe itself
+    is the caller, and the ONLY thing that should ever be trusted to mean
+    "this really came from Stripe" is a valid Stripe-Signature header
+    against STRIPE_WEBHOOK_SECRET (see StripeBilling.construct_event) --
+    same principle as ControlMiles' own stripe-webhook edge function.
+    """
+    billing = StripeBilling()
+    if not billing.webhook_secret:
+        # Not configured yet -- 200, not 4xx/5xx, so Stripe doesn't retry-
+        # storm an endpoint that was never meant to receive events yet.
+        return {"received": False, "reason": "webhook not configured"}
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    try:
+        event = billing.construct_event(payload, sig_header)
+    except Exception as e:
+        logger.warning(f"[billing] webhook signature verification failed: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    event_type = event["type"]
+    data = event["data"]["object"]
+
+    if event_type == "checkout.session.completed":
+        app_source = (data.get("metadata") or {}).get("app_source")
+        plan = (data.get("metadata") or {}).get("plan")
+        if app_source:
+            app_billing_manager.upsert_billing(
+                app_source=app_source,
+                plan=plan,
+                stripe_customer_id=data.get("customer"),
+                stripe_subscription_id=data.get("subscription"),
+                status="active",
+            )
+            logger.info(f"[billing] checkout completed for app_source={app_source}, plan={plan}")
+
+    elif event_type in ("customer.subscription.updated", "customer.subscription.deleted"):
+        app_source = (data.get("metadata") or {}).get("app_source")
+        if app_source:
+            new_status = "canceled" if event_type.endswith("deleted") else data.get("status", "active")
+            price_id = None
+            items = (data.get("items") or {}).get("data") or []
+            if items:
+                price_id = (items[0].get("price") or {}).get("id")
+            app_billing_manager.upsert_billing(
+                app_source=app_source,
+                stripe_subscription_id=data.get("id"),
+                stripe_price_id=price_id,
+                status=new_status,
+            )
+            logger.info(f"[billing] subscription {event_type} for app_source={app_source} -> {new_status}")
+
+    return {"received": True}
 
 # =========================
 # PERFORMANCE TRACING
