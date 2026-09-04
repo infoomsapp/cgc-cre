@@ -1405,14 +1405,17 @@ class Database:
         layer, and RLS is a deliberate no-op for it regardless of what's
         written here) -- only `cgc_app` is meant to ever be tenant-scoped.
 
-        Wiring: nothing connects as `cgc_app` until CGC_DATABASE_URL is
-        updated to use it. Only app/modules/pod/pod_repository.py has the
-        set_config('cgc.current_tenant_id', ...) plumbing a policy can key
-        off of today (see get_connection() there) -- TCO and the 4
-        tenant-scoped cgc_guard tables get policies here too (safe, since
-        nothing uses cgc_app for them yet), but wiring their write/read
-        paths to actually set that session variable is a deliberate,
-        separate follow-up, not done in this pass.
+        Wiring (2026-09-04, closed): the follow-up flagged below as not-yet-
+        done in this pass now is. get_scoped_connection() (this file,
+        ~line 185) is the general-purpose counterpart to pod_repository.py's
+        own set_config('cgc.current_tenant_id', ...) plumbing -- it's the
+        real call site for cgc_guard.internal_flags/suspicious_payloads/
+        tenant_plans/tenant_usage, used from multi_tenant.py, payload_guard.py,
+        and internal_guard.py. It reads CGC_DATABASE_URL (falling back to the
+        admin pool if unset or unreachable, so this degrades safely) --
+        RLS only genuinely enforces once that env var is pointed at a real
+        cgc_app DSN in the deployed environment; verified live end-to-end
+        (two tenants, cross-read denied each way) once it was.
 
         cgc_pod.pod_ledger stores tenant_id as the uuid5 of the raw tenant
         id (see pod_repository.py's _ledger_uid()), not the raw string
