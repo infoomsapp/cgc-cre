@@ -699,6 +699,7 @@ _DASHBOARD_HOME_HTML = (Path(__file__).parent / "static" / "dashboard_home.html"
 _DASHBOARD_GOVERNANCE_HTML = (Path(__file__).parent / "static" / "dashboard_governance.html").read_text(encoding="utf-8")
 _DASHBOARD_SCORING_HTML = (Path(__file__).parent / "static" / "dashboard_scoring.html").read_text(encoding="utf-8")
 _DASHBOARD_SECURITY_HTML = (Path(__file__).parent / "static" / "dashboard_security.html").read_text(encoding="utf-8")
+_DASHBOARD_TENANTS_HTML = (Path(__file__).parent / "static" / "dashboard_tenants.html").read_text(encoding="utf-8")
 
 # 2026-08-24: the one deliberate exception to "no shared-asset routes" above
 # -- the real CGC-core brand mark (cropped/chroma-keyed to a transparent PNG
@@ -748,6 +749,14 @@ async def dashboard_scoring() -> HTMLResponse:
 async def dashboard_security() -> HTMLResponse:
     """Guard Activity (Phase 2/3 stat cards + tables) + Recent Errors."""
     return HTMLResponse(content=_DASHBOARD_SECURITY_HTML)
+
+@app.get("/dashboard/tenants", tags=["System"], response_class=HTMLResponse)
+async def dashboard_tenants() -> HTMLResponse:
+    """Gap 3: tenant onboarding -- issue/revoke per-tenant API keys (Gap 1),
+    send Stripe checkout links and view billing status (Gap 2). Admin-only
+    (the page's own boot() calls /admin/api-keys to gate entry), not
+    self-serve -- see the roadmap's own scope note."""
+    return HTMLResponse(content=_DASHBOARD_TENANTS_HTML)
 
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:
