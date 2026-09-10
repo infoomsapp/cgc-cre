@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CGC Core — Tenants</title>
+<title>CGC Core — Launch Readiness</title>
 <link rel="icon" type="image/png" sizes="32x32" href="/static/img/cgc_favicon_32.png">
 <link rel="icon" type="image/png" sizes="64x64" href="/static/img/cgc_favicon_64.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/img/cgc_favicon_180.png">
@@ -74,7 +74,7 @@
   #dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
   .logout { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; }
 
-  .topnav { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+  .topnav { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; flex-wrap: wrap; }
   .topnav a {
     color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 700;
     padding: 6px 12px; border-radius: 6px; letter-spacing: 0.02em;
@@ -90,7 +90,8 @@
   .formRow { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
   .fieldGroup { display: flex; flex-direction: column; gap: 4px; }
   .fieldGroup label { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .field { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--mono); font-size: 12.5px; min-width: 200px; }
+  .field { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--mono); font-size: 12.5px; min-width: 160px; }
+  select.field { font-family: var(--sans); }
   .msg { font-size: 12px; margin-top: 10px; min-height: 16px; }
   .msg.err { color: var(--red); }
   .msg.ok { color: var(--green); }
@@ -100,24 +101,36 @@
   th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px; white-space: nowrap; }
   th { color: var(--muted); text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.04em; background: var(--panel-2); }
   tr:last-child td { border-bottom: none; }
+  td.wrap { white-space: normal; }
   td.actions { display: flex; gap: 6px; }
   .pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 100px; font-size: 10.5px; font-weight: 700; }
   .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; }
-  .pill.active { background: var(--green-bg); color: var(--green); }
-  .pill.active::before { background: var(--green); }
-  .pill.revoked, .pill.canceled, .pill.past_due { background: var(--red-bg); color: var(--red); }
-  .pill.revoked::before, .pill.canceled::before, .pill.past_due::before { background: var(--red); }
-  .pill.free { background: var(--panel-2); color: var(--muted); }
-  .pill.free::before { background: var(--muted); }
+  .pill.done { background: var(--green-bg); color: var(--green); }
+  .pill.done::before { background: var(--green); }
+  .pill.pending { background: var(--amber-bg); color: var(--amber); }
+  .pill.pending::before { background: var(--amber); }
+  .pill.blocked { background: var(--red-bg); color: var(--red); }
+  .pill.blocked::before { background: var(--red); }
 
-  .modalBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; z-index: 10; padding: 20px; }
-  .modalBg.show { display: flex; }
-  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 24px; max-width: 480px; width: 100%; }
-  .modal h3 { margin: 0 0 8px; font-size: 14px; }
-  .modal p { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
-  .keyBox { background: var(--panel-2); border: 1px solid var(--accent); border-radius: 6px; padding: 12px; font-family: var(--mono); font-size: 12px; word-break: break-all; margin-bottom: 14px; }
-  .modal .warn { color: var(--amber); font-size: 11.5px; margin-bottom: 14px; }
-  .modal .row { display: flex; gap: 8px; }
+  .scoreRow { display: flex; gap: 14px; flex-wrap: wrap; }
+  .scoreCard {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; min-width: 140px; flex: 1;
+  }
+  .scoreCard .n { font-size: 26px; font-weight: 800; font-family: var(--mono); }
+  .scoreCard .l { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 2px; }
+  .scoreCard.done .n { color: var(--green); }
+  .scoreCard.pending .n { color: var(--amber); }
+  .scoreCard.blocked .n { color: var(--red); }
+
+  .snapCard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 12px; }
+  .snapCard h3 { margin: 0 0 4px; font-size: 12.5px; }
+  .snapCard .meta { color: var(--muted); font-size: 11px; font-family: var(--mono); margin-bottom: 10px; }
+  .snapCard pre {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; font-size: 11.5px; overflow-x: auto; margin: 0; color: var(--text);
+  }
+  .select { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px 10px; font-size: 12.5px; }
 </style>
 </head>
 <body>
@@ -145,7 +158,7 @@
     <div class="brandRow">
       <img src="/static/img/cgc_icon.png" alt="" class="brandIcon">
       <div>
-        <h1>CGC Core — Tenants</h1>
+        <h1>CGC Core — Launch Readiness</h1>
         <div class="sub">cgc-cre.vercel.app</div>
       </div>
     </div>
@@ -161,76 +174,70 @@
     <a href="/dashboard/governance">Governance</a>
     <a href="/dashboard/scoring">Scoring</a>
     <a href="/dashboard/security">Security</a>
-    <a href="/dashboard/tenants" class="active">Tenants</a>
-    <a href="/dashboard/launch-readiness">Launch Readiness</a>
+    <a href="/dashboard/tenants">Tenants</a>
+    <a href="/dashboard/launch-readiness" class="active">Launch Readiness</a>
   </nav>
 
   <section>
-    <h2>Create Tenant</h2>
+    <div class="formRow" style="margin-bottom:14px;">
+      <div class="fieldGroup">
+        <label for="appSourceSelect">App</label>
+        <select id="appSourceSelect" class="select">
+          <option value="controlmiles">controlmiles</option>
+        </select>
+      </div>
+      <button class="btn" style="width:auto" onclick="refreshSignals()">Refresh automated signals</button>
+      <div class="msg" id="refreshMsg" style="align-self:center;"></div>
+    </div>
+
+    <h2>Readiness</h2>
+    <div class="scoreRow">
+      <div class="scoreCard done"><div class="n" id="countDone">—</div><div class="l">Done</div></div>
+      <div class="scoreCard pending"><div class="n" id="countPending">—</div><div class="l">Pending</div></div>
+      <div class="scoreCard blocked"><div class="n" id="countBlocked">—</div><div class="l">Blocked</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Automated Signals</h2>
+    <div id="snapshots"></div>
+  </section>
+
+  <section>
+    <h2>Add Checklist Item</h2>
     <div class="formCard">
       <div class="formRow">
         <div class="fieldGroup">
-          <label for="newAppSource">App source (unique id)</label>
-          <input id="newAppSource" class="field" placeholder="e.g. acme-corp">
+          <label for="newCategory">Category</label>
+          <input id="newCategory" class="field" placeholder="e.g. Play Console">
         </div>
         <div class="fieldGroup">
-          <label for="newScopes">Scopes (comma-separated, optional)</label>
-          <input id="newScopes" class="field" placeholder="e.g. governance,monitor">
+          <label for="newItem">Item</label>
+          <input id="newItem" class="field" placeholder="e.g. Data Safety form submitted" style="min-width:280px;">
         </div>
-        <button class="btn" style="width:auto" onclick="createTenant()">Issue API key</button>
+        <div class="fieldGroup">
+          <label for="newStatus">Status</label>
+          <select id="newStatus" class="field">
+            <option value="pending">pending</option>
+            <option value="done">done</option>
+            <option value="blocked">blocked</option>
+          </select>
+        </div>
+        <button class="btn" style="width:auto" onclick="addChecklistItem()">Add</button>
       </div>
-      <div class="msg" id="createMsg"></div>
+      <div class="msg" id="addMsg"></div>
     </div>
   </section>
 
   <section>
-    <h2>API Keys</h2>
+    <h2>Checklist</h2>
     <div class="tablewrap">
-      <table id="keysTable">
-        <thead><tr><th>App source</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody id="keysBody"></tbody>
+      <table id="checklistTable">
+        <thead><tr><th>Category</th><th>Item</th><th>Status</th><th>Note</th><th>Updated</th><th>Actions</th></tr></thead>
+        <tbody id="checklistBody"></tbody>
       </table>
     </div>
   </section>
-
-  <section>
-    <h2>Billing</h2>
-    <div class="tablewrap">
-      <table id="billingTable">
-        <thead><tr><th>App source</th><th>Plan</th><th>Status</th><th>Stripe customer</th><th>Actions</th></tr></thead>
-        <tbody id="billingBody"></tbody>
-      </table>
-    </div>
-  </section>
-</div>
-
-<div class="modalBg" id="keyModal">
-  <div class="modal">
-    <h3>API key created</h3>
-    <p>This is the only time the full key is shown — it can't be recovered later, only revoked and replaced.</p>
-    <div class="keyBox" id="keyModalValue"></div>
-    <div class="warn">Copy it now and store it securely.</div>
-    <button class="btn" onclick="closeKeyModal()">Done</button>
-  </div>
-</div>
-
-<div class="modalBg" id="checkoutModal">
-  <div class="modal">
-    <h3>Send checkout link</h3>
-    <p id="checkoutModalSub"></p>
-    <div class="fieldGroup" style="margin-bottom:14px;">
-      <label for="checkoutPlan">Plan</label>
-      <select id="checkoutPlan" class="field" style="width:100%;">
-        <option value="STANDARD">STANDARD</option>
-        <option value="ENTERPRISE">ENTERPRISE</option>
-      </select>
-    </div>
-    <div id="checkoutResult" class="msg"></div>
-    <div class="row">
-      <button class="btn secondary" style="width:auto" onclick="closeCheckoutModal()">Close</button>
-      <button class="btn" style="width:auto" onclick="submitCheckoutLink()">Generate link</button>
-    </div>
-  </div>
 </div>
 
 <script>
@@ -296,132 +303,128 @@ function fmtDate(s) {
   if (!s) return '—';
   return String(s).slice(0, 19).replace('T', ' ');
 }
+function currentAppSource() {
+  return document.getElementById('appSourceSelect').value;
+}
 
-// ---- Create tenant (Gap 1: issue an API key bound to a new app_source) ----
-async function createTenant() {
-  const appSource = document.getElementById('newAppSource').value.trim();
-  const scopes = document.getElementById('newScopes').value.trim();
-  const msgEl = document.getElementById('createMsg');
+// ---- Checklist ----
+async function addChecklistItem() {
+  const category = document.getElementById('newCategory').value.trim();
+  const item = document.getElementById('newItem').value.trim();
+  const status = document.getElementById('newStatus').value;
+  const msgEl = document.getElementById('addMsg');
   msgEl.className = 'msg';
   msgEl.textContent = '';
-  if (!appSource) { msgEl.className = 'msg err'; msgEl.textContent = 'App source is required.'; return; }
+  if (!category || !item) { msgEl.className = 'msg err'; msgEl.textContent = 'Category and item are required.'; return; }
 
   try {
-    const body = new URLSearchParams({ app_source: appSource, scopes });
-    const result = await api('/admin/api-keys', {
+    await api(`/launch-readiness/${currentAppSource()}/checklist`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category, item, status }),
     });
-    document.getElementById('newAppSource').value = '';
-    document.getElementById('newScopes').value = '';
-    document.getElementById('keyModalValue').textContent = result.key;
-    document.getElementById('keyModal').classList.add('show');
+    document.getElementById('newCategory').value = '';
+    document.getElementById('newItem').value = '';
+    document.getElementById('newStatus').value = 'pending';
     await refresh();
   } catch (e) {
     msgEl.className = 'msg err';
     msgEl.textContent = e.message;
   }
 }
-function closeKeyModal() {
-  document.getElementById('keyModal').classList.remove('show');
-  document.getElementById('keyModalValue').textContent = '';
-}
 
-async function revokeKey(id) {
-  if (!confirm('Revoke this API key? Any caller using it will lose access immediately.')) return;
+// Keyed by id after every refresh() -- cycleStatus looks the real
+// category/item up here instead of round-tripping them through an inline
+// onclick attribute (avoids any HTML-escaping edge case in item text).
+let checklistById = {};
+
+async function cycleStatus(id) {
+  const current = checklistById[id];
+  if (!current) return;
+  const order = ['pending', 'done', 'blocked'];
+  const next = order[(order.indexOf(current.status) + 1) % order.length];
   try {
-    await api(`/admin/api-keys/${id}/revoke`, { method: 'POST' });
+    await api(`/launch-readiness/${currentAppSource()}/checklist`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, status: next, category: current.category, item: current.item, note: current.note }),
+    });
     await refresh();
   } catch (e) {
-    alert('Revoke failed: ' + e.message);
+    alert('Update failed: ' + e.message);
   }
 }
 
-// ---- Billing (Gap 2) ----
-let checkoutAppSource = null;
-
-function openCheckoutModal(appSource) {
-  checkoutAppSource = appSource;
-  document.getElementById('checkoutModalSub').textContent = `For app_source: ${appSource}`;
-  document.getElementById('checkoutResult').textContent = '';
-  document.getElementById('checkoutModal').classList.add('show');
-}
-function closeCheckoutModal() {
-  document.getElementById('checkoutModal').classList.remove('show');
-  checkoutAppSource = null;
-}
-async function submitCheckoutLink() {
-  const plan = document.getElementById('checkoutPlan').value;
-  const resultEl = document.getElementById('checkoutResult');
-  resultEl.className = 'msg';
-  resultEl.textContent = 'Generating…';
+async function deleteItem(id) {
+  if (!confirm('Delete this checklist item?')) return;
   try {
-    const body = new URLSearchParams({ app_source: checkoutAppSource, plan });
-    const result = await api('/admin/billing/checkout-link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-    if (result.configured === false) {
-      resultEl.className = 'msg err';
-      resultEl.textContent = result.reason || 'Stripe not configured yet.';
-      return;
-    }
-    resultEl.className = 'msg ok';
-    resultEl.innerHTML = `Link ready: <a href="${esc(result.url)}" target="_blank" style="color:var(--accent)">${esc(result.url)}</a>`;
+    await api(`/launch-readiness/${currentAppSource()}/checklist/${id}`, { method: 'DELETE' });
+    await refresh();
   } catch (e) {
-    resultEl.className = 'msg err';
-    resultEl.textContent = e.message;
+    alert('Delete failed: ' + e.message);
   }
 }
 
-async function openPortalLink(appSource) {
+// ---- Automated signals ----
+async function refreshSignals() {
+  const msgEl = document.getElementById('refreshMsg');
+  msgEl.className = 'msg';
+  msgEl.textContent = 'Refreshing…';
   try {
-    const result = await api(`/admin/billing/portal-link/${encodeURIComponent(appSource)}`);
-    if (result.configured === false) {
-      alert(result.reason || 'Stripe not configured yet.');
-      return;
-    }
-    window.open(result.url, '_blank');
+    await api(`/launch-readiness/${currentAppSource()}/refresh`, { method: 'POST' });
+    msgEl.className = 'msg ok';
+    msgEl.textContent = 'Done.';
+    await refresh();
   } catch (e) {
-    alert('Could not open billing portal: ' + e.message);
+    msgEl.className = 'msg err';
+    msgEl.textContent = e.message;
   }
 }
 
-// ---- Refresh ----
+function renderSnapshots(snapshots) {
+  const el = document.getElementById('snapshots');
+  if (!snapshots || !snapshots.length) {
+    el.innerHTML = `<div class="empty">No automated signals pulled yet — click "Refresh automated signals" above.</div>`;
+    return;
+  }
+  el.innerHTML = snapshots.map(s => `
+    <div class="snapCard">
+      <h3>${esc(s.source)}</h3>
+      <div class="meta">fetched ${fmtDate(s.fetched_at)}</div>
+      <pre>${esc(JSON.stringify(s.payload, null, 2))}</pre>
+    </div>
+  `).join('');
+}
+
+// ---- Refresh (page data, not the automated pull) ----
 async function refresh() {
+  const appSource = currentAppSource();
   try {
-    const [keysData, billingData] = await Promise.all([
-      api('/admin/api-keys'),
-      api('/admin/billing/apps'),
+    const [summary, checklist] = await Promise.all([
+      api(`/launch-readiness/${appSource}/summary`),
+      api(`/launch-readiness/${appSource}/checklist`),
     ]);
 
-    const keys = keysData.keys || [];
-    document.getElementById('keysBody').innerHTML = keys.length ? keys.map(k => `
-      <tr>
-        <td>${esc(k.app_source)}</td>
-        <td>${esc(k.key_prefix)}…</td>
-        <td>${fmtDate(k.created_at)}</td>
-        <td>${fmtDate(k.last_used_at)}</td>
-        <td><span class="pill ${k.revoked_at ? 'revoked' : 'active'}">${k.revoked_at ? 'revoked' : 'active'}</span></td>
-        <td class="actions">${k.revoked_at ? '' : `<button class="btn danger small" onclick="revokeKey('${esc(k.id)}')">Revoke</button>`}</td>
-      </tr>
-    `).join('') : `<tr><td colspan="6" class="empty">No API keys issued yet</td></tr>`;
+    const counts = summary.checklist_counts || {};
+    document.getElementById('countDone').textContent = counts.done || 0;
+    document.getElementById('countPending').textContent = counts.pending || 0;
+    document.getElementById('countBlocked').textContent = counts.blocked || 0;
 
-    const apps = billingData.apps || [];
-    document.getElementById('billingBody').innerHTML = apps.length ? apps.map(a => `
+    renderSnapshots(summary.snapshots || []);
+
+    const items = checklist.items || [];
+    checklistById = {};
+    items.forEach(it => { checklistById[it.id] = it; });
+    document.getElementById('checklistBody').innerHTML = items.length ? items.map(it => `
       <tr>
-        <td>${esc(a.app_source)}</td>
-        <td><span class="pill ${esc((a.plan || 'free').toLowerCase())}">${esc(a.plan || 'FREE')}</span></td>
-        <td><span class="pill ${esc(a.status || 'active')}">${esc(a.status || 'active')}</span></td>
-        <td>${a.stripe_customer_id ? esc(a.stripe_customer_id) : '—'}</td>
-        <td class="actions">
-          <button class="btn secondary small" onclick="openCheckoutModal('${esc(a.app_source)}')">Send checkout link</button>
-          ${a.stripe_customer_id ? `<button class="btn secondary small" onclick="openPortalLink('${esc(a.app_source)}')">Manage subscription</button>` : ''}
-        </td>
+        <td>${esc(it.category)}</td>
+        <td class="wrap">${esc(it.item)}</td>
+        <td><span class="pill ${esc(it.status)}" style="cursor:pointer" onclick="cycleStatus(${it.id})" title="Click to cycle status">${esc(it.status)}</span></td>
+        <td class="wrap">${esc(it.note || '—')}</td>
+        <td>${fmtDate(it.updated_at)}</td>
+        <td class="actions"><button class="btn danger small" onclick="deleteItem(${it.id})">Delete</button></td>
       </tr>
-    `).join('') : `<tr><td colspan="5" class="empty">No billing records yet — issue an API key above, or send a checkout link for a new app_source below</td></tr>`;
+    `).join('') : `<tr><td colspan="6" class="empty">No checklist items yet — add one above.</td></tr>`;
 
     document.getElementById('dot').style.background = 'var(--green)';
     document.getElementById('gateErr').textContent = '';
@@ -432,15 +435,17 @@ async function refresh() {
   }
 }
 
+document.getElementById('appSourceSelect').addEventListener('change', refresh);
+
 async function boot() {
   document.getElementById('gate').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   try {
-    await api('/admin/api-keys');
+    await api(`/launch-readiness/${currentAppSource()}/summary`);
   } catch (e) {
     document.getElementById('app').style.display = 'none';
     document.getElementById('gate').style.display = 'flex';
-    document.getElementById('gateErr').textContent = 'Invalid token, or this account is not an admin.';
+    document.getElementById('gateErr').textContent = 'Invalid token.';
     return;
   }
   refresh();

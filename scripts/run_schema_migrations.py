@@ -51,6 +51,7 @@ def main() -> None:
         ("_create_guard_schema", db._create_guard_schema),
         ("_create_auth_schema", db._create_auth_schema),
         ("_create_rls_policies", db._create_rls_policies),
+        ("_create_launch_readiness_schema", db._create_launch_readiness_schema),
     ]
 
     for name, step in steps:

@@ -48,6 +48,10 @@ from api.v1.endpoints.verify import router as verify_router
 # Application monitoring router (LedgiProof + LedgiProof Tax Pro client error reports).
 from api.v1.endpoints.monitor import router as monitor_router, ALLOWED_APP_SOURCES
 
+# Launch-readiness router (Play Store / App Store submission tracking) --
+# manual checklist + automated repo/Supabase-advisor signals, per app_source.
+from api.v1.endpoints.launch_readiness import router as launch_readiness_router
+
 # Business-flow scoring router (read-only aggregation over the TCO ledger — Phase 1
 # of the CGC Core reinforcement plan).
 from api.v1.endpoints.flow_score import router as flow_score_router
@@ -215,6 +219,14 @@ async def require_admin_or_service(user=Depends(get_current_user)):
 # at the router level so monitor.py itself carries no auth logic.
 app.include_router(
     monitor_router, prefix="/monitor", tags=["Monitoring"],
+    dependencies=[Depends(get_current_user)]
+)
+
+# Mount the launch-readiness router → /launch-readiness/{app_source}/...
+# Same auth bar as monitor.py -- see launch_readiness.py's own header
+# comment for why writes here aren't further admin-gated.
+app.include_router(
+    launch_readiness_router, prefix="/launch-readiness", tags=["Launch Readiness"],
     dependencies=[Depends(get_current_user)]
 )
 
@@ -700,6 +712,7 @@ _DASHBOARD_GOVERNANCE_HTML = (Path(__file__).parent / "static" / "dashboard_gove
 _DASHBOARD_SCORING_HTML = (Path(__file__).parent / "static" / "dashboard_scoring.html").read_text(encoding="utf-8")
 _DASHBOARD_SECURITY_HTML = (Path(__file__).parent / "static" / "dashboard_security.html").read_text(encoding="utf-8")
 _DASHBOARD_TENANTS_HTML = (Path(__file__).parent / "static" / "dashboard_tenants.html").read_text(encoding="utf-8")
+_DASHBOARD_LAUNCH_HTML = (Path(__file__).parent / "static" / "dashboard_launch.html").read_text(encoding="utf-8")
 
 # 2026-08-24: the one deliberate exception to "no shared-asset routes" above
 # -- the real CGC-core brand mark (cropped/chroma-keyed to a transparent PNG
@@ -757,6 +770,12 @@ async def dashboard_tenants() -> HTMLResponse:
     (the page's own boot() calls /admin/api-keys to gate entry), not
     self-serve -- see the roadmap's own scope note."""
     return HTMLResponse(content=_DASHBOARD_TENANTS_HTML)
+
+@app.get("/dashboard/launch-readiness", tags=["System"], response_class=HTMLResponse)
+async def dashboard_launch() -> HTMLResponse:
+    """Play Store / App Store submission readiness -- manual checklist +
+    automated repo/Supabase-advisor signals, per app_source."""
+    return HTMLResponse(content=_DASHBOARD_LAUNCH_HTML)
 
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:

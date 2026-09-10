@@ -1954,6 +1954,189 @@ class Database:
                 return deleted
 
     # ======================================================================
+    # LAUNCH READINESS (Play Store / App Store submission tracking)
+    # ======================================================================
+    # Two flat cgc_-prefixed tables, same convention as cgc_error_reports
+    # above: cgc_launch_checklist_items (manual, admin-edited rows for the
+    # things no API can verify -- Play Console/Apple Developer account
+    # state) and cgc_launch_snapshot (the latest cached pull from each
+    # automated signal source -- a repo manifest fetched from GitHub, and
+    # Supabase's own security/performance advisors -- refreshed on demand
+    # via POST .../refresh, never polled). Best-effort provisioning, same
+    # posture as _create_jla_schema: a failure here must never take down
+    # the whole app, this is a secondary feature.
+
+    def _create_launch_readiness_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_launch_checklist_items (
+                        id          BIGSERIAL PRIMARY KEY,
+                        app_source  VARCHAR(50) NOT NULL,
+                        category    VARCHAR(100) NOT NULL,
+                        item        TEXT NOT NULL,
+                        status      VARCHAR(20) NOT NULL DEFAULT 'pending',
+                        note        TEXT,
+                        updated_by  VARCHAR(255),
+                        created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_launch_checklist_app_source
+                        ON cgc_launch_checklist_items (app_source)
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_launch_snapshot (
+                        id          BIGSERIAL PRIMARY KEY,
+                        app_source  VARCHAR(50) NOT NULL,
+                        source      VARCHAR(20) NOT NULL,
+                        payload     JSONB NOT NULL,
+                        fetched_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        UNIQUE (app_source, source)
+                    )
+                """)
+                logger.info("Launch readiness schema ready")
+        except Exception as e:
+            logger.warning(f"_create_launch_readiness_schema failed (non-fatal): {e}")
+
+    def save_checklist_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Insert a new checklist row, or update an existing one when
+        item['id'] is provided. Returns the resulting row."""
+        item_id = item.get('id')
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if item_id:
+                        cur.execute("""
+                            UPDATE cgc_launch_checklist_items
+                            SET category = %s, item = %s, status = %s,
+                                note = %s, updated_by = %s, updated_at = NOW()
+                            WHERE id = %s AND app_source = %s
+                            RETURNING *
+                        """, (
+                            item.get('category'), item.get('item'), item.get('status', 'pending'),
+                            item.get('note'), item.get('updated_by'), item_id, item.get('app_source'),
+                        ))
+                    else:
+                        cur.execute("""
+                            INSERT INTO cgc_launch_checklist_items
+                                (app_source, category, item, status, note, updated_by)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            RETURNING *
+                        """, (
+                            item.get('app_source'), item.get('category'), item.get('item'),
+                            item.get('status', 'pending'), item.get('note'), item.get('updated_by'),
+                        ))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                items = self._read_json_list('launch_checklist_items.json')
+                now = datetime.now(timezone.utc).isoformat()
+                if item_id:
+                    for r in items:
+                        if r.get('id') == item_id:
+                            r.update({
+                                'category': item.get('category'), 'item': item.get('item'),
+                                'status': item.get('status', 'pending'), 'note': item.get('note'),
+                                'updated_by': item.get('updated_by'), 'updated_at': now,
+                            })
+                            self._write_json_list('launch_checklist_items.json', items)
+                            return r
+                new_row = {
+                    'id': int(time.time() * 1000),
+                    'app_source': item.get('app_source'), 'category': item.get('category'),
+                    'item': item.get('item'), 'status': item.get('status', 'pending'),
+                    'note': item.get('note'), 'updated_by': item.get('updated_by'),
+                    'created_at': now, 'updated_at': now,
+                }
+                items.append(new_row)
+                self._write_json_list('launch_checklist_items.json', items)
+                return new_row
+
+    def list_checklist_items(self, app_source: str) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT * FROM cgc_launch_checklist_items
+                        WHERE app_source = %s
+                        ORDER BY category, id
+                    """, (app_source,))
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            items = self._read_json_list('launch_checklist_items.json')
+            items = [r for r in items if r.get('app_source') == app_source]
+            items.sort(key=lambda r: (r.get('category', ''), r.get('id', 0)))
+            return items
+
+    def delete_checklist_item(self, item_id: int, app_source: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM cgc_launch_checklist_items WHERE id = %s AND app_source = %s",
+                        (item_id, app_source)
+                    )
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                items = self._read_json_list('launch_checklist_items.json')
+                remaining = [r for r in items if not (r.get('id') == item_id and r.get('app_source') == app_source)]
+                found = len(remaining) != len(items)
+                if found:
+                    self._write_json_list('launch_checklist_items.json', remaining)
+                return found
+
+    def save_snapshot(self, app_source: str, source: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert the latest pull from one automated signal source
+        ('repo' or 'supabase') -- one row per (app_source, source), always
+        overwritten with the freshest data, never accumulated as history."""
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_launch_snapshot (app_source, source, payload, fetched_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (app_source, source) DO UPDATE SET
+                            payload = EXCLUDED.payload, fetched_at = NOW()
+                        RETURNING *
+                    """, (app_source, source, Json(payload)))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                snapshots = self._read_json_list('launch_snapshot.json')
+                now = datetime.now(timezone.utc).isoformat()
+                for r in snapshots:
+                    if r.get('app_source') == app_source and r.get('source') == source:
+                        r['payload'] = payload
+                        r['fetched_at'] = now
+                        self._write_json_list('launch_snapshot.json', snapshots)
+                        return r
+                new_row = {'app_source': app_source, 'source': source, 'payload': payload, 'fetched_at': now}
+                snapshots.append(new_row)
+                self._write_json_list('launch_snapshot.json', snapshots)
+                return new_row
+
+    def get_latest_snapshots(self, app_source: str) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT * FROM cgc_launch_snapshot WHERE app_source = %s ORDER BY source",
+                        (app_source,)
+                    )
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            snapshots = self._read_json_list('launch_snapshot.json')
+            return [r for r in snapshots if r.get('app_source') == app_source]
+
+    # ======================================================================
     # ANALYTICS & LEARNING QUERIES
     # ======================================================================
 
