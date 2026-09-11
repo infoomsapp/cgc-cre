@@ -199,9 +199,9 @@ async def require_admin_or_service(user=Depends(get_current_user)):
     (a caller presenting CGC_SERVICE_API_KEY -- see AuthSystem.verify_token,
     role "service"). Built for /admin/cleanup/guard-tables specifically:
     that endpoint is meant to be hit by a scheduler (Vercel Cron, a GitHub
-    Action, cron-job.com), and a normal admin JWT expires after 7 days
+    Action, cron-job.com), and a normal admin JWT expires after 30 days
     (AuthSystem.login()), which would mean manually refreshing whatever
-    secret the scheduler holds every week. CGC_SERVICE_API_KEY is already
+    secret the scheduler holds every month. CGC_SERVICE_API_KEY is already
     the long-lived, first-party credential this codebase trusts for
     server-to-server calls (LedgiProof's cgc-evaluate/report-error edge
     functions use it today) -- reusing it here avoids a second credential

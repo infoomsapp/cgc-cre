@@ -640,7 +640,7 @@ class AuthSystem:
         Permanently delete a user account and revoke every session it holds.
         Sessions are deleted (not just the user row) because verify_token()
         checks _get_session() on every request -- without this, a deleted
-        user's existing JWT would keep authenticating for up to 7 days
+        user's existing JWT would keep authenticating for up to 30 days
         (AuthSystem.login()'s token lifetime) until natural expiry.
         """
         deleted = self._delete_user(email)
@@ -661,7 +661,7 @@ class AuthSystem:
             "role": role,
             "iat": now,
             "nbf": now,
-            "exp": now + timedelta(days=7),
+            "exp": now + timedelta(days=30),
             "jti": secrets.token_hex(12),
         }
         token = jwt.encode(payload, self.jwt_secret, algorithm=self.jwt_algorithms[0])
@@ -720,7 +720,7 @@ class AuthSystem:
         self._update_user(email, last_login=datetime.now(timezone.utc).isoformat(), login_count=new_login_count)
 
         token = self._create_token(email, user["role"])
-        expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
         self._insert_session(token, email, user["role"], expires_at, ip)
 
         logger.info(f"[auth] login successful: {email}")
