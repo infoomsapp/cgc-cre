@@ -1106,6 +1106,23 @@ async def get_scoring_methodology(user=Depends(get_current_user)) -> Dict[str, A
     }
 
 
+@app.get("/compliance/glba-safeguards", tags=["Governance"])
+async def get_glba_safeguards(user=Depends(get_current_user)) -> Dict[str, Any]:
+    """
+    FTC Safeguards Rule (16 CFR Part 314) self-assessment -- see
+    ComplianceEngine.validate_glba_safeguards's own docstring for why
+    GLBA (not HIPAA or FINRA) is the framework that actually applies to
+    a CGC Core consumer (LedgiProof/LedgiProof Tax Pro, as tax
+    preparers), and why each element is PASS/FAIL (a real live check),
+    VERIFIED_BY_TESTS (cited, falsifiable), or MANUAL_REVIEW_REQUIRED
+    (an organizational fact no code can attest to) -- never a
+    fabricated PASS.
+    """
+    if app.compliance_engine is None:
+        raise HTTPException(status_code=503, detail="ComplianceEngine unavailable")
+    return app.compliance_engine.validate_glba_safeguards()
+
+
 @app.post("/audit/seal", tags=["Governance"])
 async def seal_governance_decision(
     payload: Dict[str, Any],

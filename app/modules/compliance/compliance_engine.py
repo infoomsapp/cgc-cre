@@ -52,6 +52,39 @@ class EUAIActRequirement(str, Enum):
     SYSTEM_REGISTRY = "system_registry"
 
 
+class GLBASafeguardsElement(str, Enum):
+    """
+    The 9 elements an "information security program" must have under the
+    FTC Safeguards Rule (16 CFR Part 314, the GLBA implementing
+    regulation covering "financial institutions" -- a definition broad
+    enough to include tax preparers, which is why this applies to
+    LedgiProof/LedgiProof Tax Pro specifically, not to every CGC Core
+    consumer). CGC Core itself is a SERVICE PROVIDER to those covered
+    entities, not the covered entity -- element 6 (service-provider
+    oversight) is exactly why a covered entity's own compliance program
+    needs an artifact like this checklist FROM its service provider.
+
+    Deliberately NOT HIPAA or FINRA: HIPAA covers entities handling
+    protected health information (none of LedgiProof/LedgiProof Tax
+    Pro/ControlMiles do), and FINRA membership rules apply to registered
+    broker-dealers and their associated persons (none of CGC Core's
+    current consumers are broker-dealers). Building checklists for
+    frameworks that govern nothing any real consumer does would be the
+    same decorative-compliance mistake this module's EU AI Act checks
+    were just rewritten to stop making -- see validate_eu_ai_act's
+    docstring.
+    """
+    QUALIFIED_INDIVIDUAL = "qualified_individual"
+    RISK_ASSESSMENT = "risk_assessment"
+    ACCESS_CONTROLS = "access_controls"
+    ENCRYPTION = "encryption"
+    MONITORING_AND_LOGGING = "monitoring_and_logging"
+    INCIDENT_RESPONSE = "incident_response"
+    SERVICE_PROVIDER_OVERSIGHT = "service_provider_oversight"
+    PERIODIC_TESTING = "periodic_testing"
+    WRITTEN_SECURITY_PROGRAM = "written_security_program"
+
+
 @dataclass
 class AI_BOM_Component:
     component_id: str
@@ -197,6 +230,169 @@ class ComplianceEngine:
             pending=pending,
             manual_review=manual_review,
         )
+
+    def validate_glba_safeguards(self) -> Dict[str, Any]:
+        """
+        FTC Safeguards Rule (16 CFR Part 314) self-assessment -- the
+        artifact a GLBA-covered entity (LedgiProof/LedgiProof Tax Pro,
+        as a tax preparer) needs from CGC Core as its SERVICE PROVIDER
+        to satisfy the Rule's own service-provider-oversight element.
+
+        Same honesty discipline as validate_eu_ai_act: each of the 9
+        elements gets one of three real statuses, never a fabricated
+        PASS --
+          - PASS/FAIL: a live check against actual system state (an env
+            var, an importable module) run at call time.
+          - VERIFIED_BY_TESTS: not runtime-checkable per-call (it's a
+            structural property of the code), but empirically proven by
+            a named, real test file that runs in CI against a live
+            Postgres -- cited so the claim is falsifiable, not asserted.
+          - MANUAL_REVIEW_REQUIRED: an organizational/personnel fact
+            (who is designated, whether a written program exists) that
+            no code can verify at all.
+        """
+        elements = []
+
+        # 1. Qualified Individual -- a personnel designation, not code-verifiable.
+        elements.append({
+            "element": GLBASafeguardsElement.QUALIFIED_INDIVIDUAL,
+            "status": "MANUAL_REVIEW_REQUIRED",
+            "evidence": {"reason": "Designating a Qualified Individual to oversee the "
+                                    "security program is an organizational decision, not "
+                                    "something this codebase can attest to."},
+        })
+
+        # 2. Risk assessment -- an organizational process (the closest
+        # code-level evidence, this session's own self-pentest, was
+        # internal, not the periodic written risk assessment the Rule
+        # requires), so this stays manual rather than borrowing that as
+        # if it satisfied the requirement.
+        elements.append({
+            "element": GLBASafeguardsElement.RISK_ASSESSMENT,
+            "status": "MANUAL_REVIEW_REQUIRED",
+            "evidence": {"reason": "Requires a periodic, written risk assessment process -- "
+                                    "this session's internal security testing (SQLi/auth/"
+                                    "rate-limit/email vectors) is real but informal, not a "
+                                    "substitute for a documented risk-assessment program."},
+        })
+
+        # 3. Access controls -- real, falsifiable evidence: named tests
+        # that run in CI against a live Postgres and actually prove
+        # per-tenant identity isolation and RBAC, not an assumption.
+        elements.append({
+            "element": GLBASafeguardsElement.ACCESS_CONTROLS,
+            "status": "VERIFIED_BY_TESTS",
+            "evidence": {
+                "tests": [
+                    "tests/test_api_keys.py (per-tenant API key identity isolation)",
+                    "tests/test_rls_isolation.py (Postgres RLS enforcement, live DB)",
+                    "tests/test_auth.py (password hashing/verification)",
+                ],
+            },
+        })
+
+        # 4. Encryption -- a real, live check: is an encryption master
+        # key actually configured right now, not just "the code supports
+        # it".
+        enc_key_set = bool(os.getenv("CGC_SCM_ENC_MASTER_V1"))
+        elements.append({
+            "element": GLBASafeguardsElement.ENCRYPTION,
+            "status": "PASS" if enc_key_set else "FAIL",
+            "evidence": {
+                "cgc_scm_enc_master_v1_configured": enc_key_set,
+                "encryption_in_transit": "Enforced at the platform level (Vercel serves "
+                                          "HTTPS-only) -- not independently verifiable from "
+                                          "inside this process, reported here for completeness "
+                                          "rather than silently omitted.",
+            },
+        })
+
+        # 5. Monitoring/logging -- real, live check: BOTH the rate-limiter
+        # module (misuse monitoring) AND the TCO audit log (record-
+        # keeping) must actually be wired -- either alone is only half
+        # of "monitoring AND logging".
+        try:
+            from app.modules.guard.rate_limiter import check_rate_limit  # noqa: F401
+            guard_wired = True
+        except ImportError:
+            guard_wired = False
+        tco_wired = self.tco is not None
+        elements.append({
+            "element": GLBASafeguardsElement.MONITORING_AND_LOGGING,
+            "status": "PASS" if (guard_wired and tco_wired) else "FAIL",
+            "evidence": {"rate_limiter_module_importable": guard_wired,
+                         "tco_audit_log_active": tco_wired},
+        })
+
+        # 6. Incident response -- real, live check: is alerting actually
+        # configured right now (both secrets set), not merely coded.
+        slack_configured = bool(os.getenv("SLACK_BOT_TOKEN")) and bool(os.getenv("SLACK_MONITOR_CHANNEL"))
+        elements.append({
+            "element": GLBASafeguardsElement.INCIDENT_RESPONSE,
+            "status": "PASS" if slack_configured else "FAIL",
+            "evidence": {"slack_alerting_configured": slack_configured},
+        })
+
+        # 7. Service-provider oversight -- this checklist IS the
+        # artifact that satisfies this element (from LedgiProof's side,
+        # evaluating CGC Core as ITS service provider). Reporting PASS
+        # on your own existence is circular, so this is honestly manual
+        # from CGC Core's own perspective -- LedgiProof's compliance
+        # program is what actually consumes this output.
+        elements.append({
+            "element": GLBASafeguardsElement.SERVICE_PROVIDER_OVERSIGHT,
+            "status": "MANUAL_REVIEW_REQUIRED",
+            "evidence": {"reason": "This checklist is itself the evidence a covered "
+                                    "entity (LedgiProof) uses to oversee CGC Core as its "
+                                    "service provider -- not something CGC Core can "
+                                    "self-certify on the covered entity's behalf."},
+        })
+
+        # 8. Periodic testing -- a real, already-known, honestly negative
+        # fact (see README's Known Gaps): no third-party pentest has
+        # been done. Reused here rather than re-invented.
+        elements.append({
+            "element": GLBASafeguardsElement.PERIODIC_TESTING,
+            "status": "FAIL",
+            "evidence": {"reason": "No third-party security audit or penetration test has "
+                                    "been performed -- only internal self-testing (see "
+                                    "README.md Known Gaps)."},
+        })
+
+        # 9. Written security program -- an organizational document, not
+        # code-verifiable.
+        elements.append({
+            "element": GLBASafeguardsElement.WRITTEN_SECURITY_PROGRAM,
+            "status": "MANUAL_REVIEW_REQUIRED",
+            "evidence": {"reason": "Requires a formal written information security program "
+                                    "document -- an organizational artifact this codebase "
+                                    "cannot produce or verify on its own."},
+        })
+
+        passed = sum(1 for e in elements if e["status"] == "PASS")
+        failed = sum(1 for e in elements if e["status"] == "FAIL")
+        verified_by_tests = sum(1 for e in elements if e["status"] == "VERIFIED_BY_TESTS")
+        manual_review = sum(1 for e in elements if e["status"] == "MANUAL_REVIEW_REQUIRED")
+
+        return {
+            "framework": "GLBA Safeguards Rule (16 CFR Part 314)",
+            "applies_to": "LedgiProof / LedgiProof Tax Pro (tax preparers are "
+                           "GLBA-covered financial institutions) -- CGC Core is "
+                           "assessed here AS THEIR SERVICE PROVIDER, per the Rule's "
+                           "own service-provider-oversight element.",
+            "not_applicable": {
+                "HIPAA": "No current CGC Core consumer (LedgiProof, LedgiProof Tax "
+                         "Pro, ControlMiles) handles protected health information.",
+                "FINRA": "No current CGC Core consumer is a registered broker-dealer "
+                         "or associated person -- FINRA membership rules apply to "
+                         "those, not to tax-preparation or mileage-tracking software.",
+            },
+            "elements": elements,
+            "passed": passed,
+            "failed": failed,
+            "verified_by_tests": verified_by_tests,
+            "manual_review": manual_review,
+        }
 
     def generate_ai_bom(self, agent_id: str, components: List[Dict]) -> List[AI_BOM_Component]:
         """
