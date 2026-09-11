@@ -8,6 +8,7 @@ import asyncio
 import os
 import io
 import json
+import re
 import base64
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -523,6 +524,59 @@ async def list_api_keys(app_source: Optional[str] = None, user=Depends(require_a
 @app.post("/admin/api-keys/{key_id}/revoke", tags=["Admin"])
 async def revoke_api_key(key_id: str, user=Depends(require_admin)) -> Dict[str, Any]:
     return app.auth.revoke_api_key(key_id)
+
+# =========================
+# SELF-SERVE TENANT ONBOARDING (was a real, disclosed gap: every
+# app_source/API key had to be issued manually by an admin via the
+# Tenants dashboard's "Create Tenant" form -- no path existed for a new
+# customer to get their own key without asking a human first).
+# =========================
+# Deliberately does NOT use require_admin -- the whole point is a
+# non-admin, self-registered user (via the existing /auth/signup) can
+# claim their own app_source. Safe within this codebase's existing
+# "no per-user tenant binding" limitation (see the /billing/upgrade
+# comment above): this endpoint only ever CREATES a brand-new,
+# not-yet-claimed app_source's key + a FREE billing stub -- it can't
+# read or modify any other tenant's data, and every other admin/billing
+# route stays require_admin-gated exactly as before. Reserved first-
+# party names (ALLOWED_APP_SOURCES) can never be self-claimed.
+_APP_SOURCE_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{2,49}$")
+
+
+class SelfSignupTenant(BaseModel):
+    app_source: str
+
+
+@app.post("/tenants/self-signup", tags=["Admin"])
+async def self_signup_tenant(
+    payload: SelfSignupTenant, request: Request, user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    app_source = payload.app_source.strip().lower()
+
+    if not _APP_SOURCE_SLUG_RE.match(app_source):
+        raise HTTPException(
+            status_code=400,
+            detail="app_source must be 3-50 characters, lowercase letters/digits/hyphens, "
+                   "starting with a letter.",
+        )
+    if app_source in ALLOWED_APP_SOURCES:
+        raise HTTPException(status_code=403, detail=f"'{app_source}' is a reserved app_source")
+
+    # 3/hour per account -- generous for real onboarding (nobody claims
+    # more than a couple of app_sources per hour honestly), a real
+    # backstop against namespace-squatting/spam, same posture as
+    # /auth/signup's own per-IP limiter above.
+    if not check_rate_limit(f"tenant_self_signup:{user['email']}", 3, 3600):
+        raise HTTPException(status_code=429, detail="Too many tenant signups — try again later")
+
+    existing_keys = app.auth.list_api_keys(app_source)
+    if any(k.get("revoked_at") is None for k in existing_keys):
+        raise HTTPException(status_code=409, detail=f"app_source '{app_source}' is already claimed")
+
+    issued = app.auth.generate_api_key(app_source, created_by=user["email"])
+    app_billing_manager.upsert_billing(app_source, plan="FREE", status="active")
+    logger.info(f"[tenants] self-signup: app_source={app_source} by {user['email']}")
+    return issued
 
 # =========================
 # STRIPE BILLING (Gap 2 -- CGC Core billing ITS OWN tenants, not any of the
