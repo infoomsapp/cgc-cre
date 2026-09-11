@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 from enum import Enum
 import hashlib
@@ -68,7 +68,7 @@ class EUAIActChecklist:
     requirement: EUAIActRequirement
     status: str
     evidence: Dict[str, Any]
-    score: float
+    score: Optional[float]  # None for MANUAL_REVIEW_REQUIRED -- not automatable
     timestamp: str
 
 
@@ -88,6 +88,7 @@ class ComplianceSummary:
     passed: int
     failed: int
     pending: int
+    manual_review: int = 0
 
 
 class ComplianceEngine:
@@ -124,32 +125,45 @@ class ComplianceEngine:
 
     def validate_eu_ai_act(self, agent_decision: Dict[str, Any], industry: str) -> ComplianceSummary:
         """
-        Validate an AI decision against the EU AI Act high-risk requirements.
-        Returns a ComplianceSummary object.
+        Validate an AI decision against all 7 EU AI Act high-risk
+        requirements. Returns a ComplianceSummary object.
+
+        REAL CHECKS (2026-09-11 rewrite): before this, only 2 of the 7
+        EUAIActRequirement members were ever evaluated, and both were
+        hardcoded placeholders (_check_data_representative/
+        _check_transparency always returned status="PASS" with a fixed
+        score, regardless of agent_decision's actual content) -- caught
+        during an external assessment of this codebase. The other 5
+        requirements were silently never checked at all.
+        Now: 4 requirements are evaluated for real from fields this
+        pipeline actually produces (TRANSPARENCY, HUMAN_OVERSIGHT,
+        CYBERSECURITY, PERFORMANCE_LOGS). The remaining 3
+        (DATA_REPRESENTATIVE, CE_MARKING, SYSTEM_REGISTRY) are properties
+        of the training dataset or an organizational/regulatory filing --
+        genuinely not verifiable from a single decision's runtime payload
+        -- so they're honestly reported as MANUAL_REVIEW_REQUIRED with an
+        evidence note explaining why, rather than a fabricated PASS.
         """
+        checkers = {
+            EUAIActRequirement.DATA_REPRESENTATIVE: self._check_data_representative,
+            EUAIActRequirement.TRANSPARENCY: self._check_transparency,
+            EUAIActRequirement.HUMAN_OVERSIGHT: self._check_human_oversight,
+            EUAIActRequirement.CYBERSECURITY: self._check_cybersecurity,
+            EUAIActRequirement.PERFORMANCE_LOGS: self._check_performance_logs,
+            EUAIActRequirement.CE_MARKING: self._check_ce_marking,
+            EUAIActRequirement.SYSTEM_REGISTRY: self._check_system_registry,
+        }
+
         checklist_items = []
-
-        # Requirement 1: Representative Data
-        data_rep = self._check_data_representative(agent_decision)
-        checklist_items.append(EUAIActChecklist(
-            requirement=EUAIActRequirement.DATA_REPRESENTATIVE,
-            status=data_rep["status"],
-            evidence=data_rep["evidence"],
-            score=data_rep["score"],
-            timestamp=datetime.utcnow().isoformat()
-        ))
-
-        # Requirement 2: Transparency
-        transparency = self._check_transparency(agent_decision)
-        checklist_items.append(EUAIActChecklist(
-            requirement=EUAIActRequirement.TRANSPARENCY,
-            status=transparency["status"],
-            evidence=transparency["evidence"],
-            score=transparency["score"],
-            timestamp=datetime.utcnow().isoformat()
-        ))
-
-        # Additional requirements would follow the same pattern
+        for requirement, checker in checkers.items():
+            result = checker(agent_decision)
+            checklist_items.append(EUAIActChecklist(
+                requirement=requirement,
+                status=result["status"],
+                evidence=result["evidence"],
+                score=result["score"],
+                timestamp=datetime.utcnow().isoformat()
+            ))
 
         profile = self.profiles.get(industry, self.profiles["banking"])
         profile.checklist = checklist_items
@@ -159,19 +173,29 @@ class ComplianceEngine:
     def _generate_compliance_summary(self, profile: NISTProfile) -> ComplianceSummary:
         """
         Compute aggregated compliance metrics for the profile.
+
+        MANUAL_REVIEW_REQUIRED items (score=None -- genuinely not
+        automatable, see validate_eu_ai_act's docstring) are counted
+        separately and excluded from overall_score's average, rather
+        than either faking a numeric score for them or letting a
+        division silently treat None as 0 -- either would misrepresent
+        what fraction of the AUTOMATABLE checks actually passed.
         """
         passed = sum(1 for c in profile.checklist if c.status == "PASS")
         failed = sum(1 for c in profile.checklist if c.status == "FAIL")
         pending = sum(1 for c in profile.checklist if c.status == "PENDING")
+        manual_review = sum(1 for c in profile.checklist if c.status == "MANUAL_REVIEW_REQUIRED")
 
-        overall = sum(c.score for c in profile.checklist) / len(profile.checklist)
+        scored = [c.score for c in profile.checklist if c.score is not None]
+        overall = (sum(scored) / len(scored)) if scored else 0.0
 
         return ComplianceSummary(
             profile=profile,
             overall_score=overall,
             passed=passed,
             failed=failed,
-            pending=pending
+            pending=pending,
+            manual_review=manual_review,
         )
 
     def generate_ai_bom(self, agent_id: str, components: List[Dict]) -> List[AI_BOM_Component]:
@@ -239,7 +263,7 @@ class ComplianceEngine:
             checklist_data.append([
                 item.requirement.value,
                 item.status,
-                f"{item.score}%"
+                f"{item.score}%" if item.score is not None else "N/A (manual review)"
             ])
         story.append(Table(checklist_data))
 
@@ -262,15 +286,156 @@ class ComplianceEngine:
 
     def _check_data_representative(self, decision: Dict) -> Dict:
         """
-        Placeholder for representative data validation logic.
+        Article 10 (data governance): is the training/eval data
+        representative of the population the system decides about? This
+        is a property of the DATASET, not of any single runtime decision
+        -- nothing in a per-decision payload (module scores, weights,
+        signature) can answer it. Honestly reported as
+        MANUAL_REVIEW_REQUIRED rather than a fabricated PASS.
         """
-        return {"status": "PASS", "evidence": {}, "score": 92.5}
+        return {
+            "status": "MANUAL_REVIEW_REQUIRED",
+            "evidence": {
+                "reason": "Dataset representativeness cannot be assessed from a single "
+                          "decision's runtime payload -- this pipeline tracks no dataset "
+                          "lineage/statistics. Requires a separate, org-level data audit.",
+            },
+            "score": None,
+        }
 
     def _check_transparency(self, decision: Dict) -> Dict:
         """
-        Placeholder for transparency validation logic.
+        Article 13 (transparency): can the person affected by this
+        decision understand why it was made? Real check against the
+        actual decision payload -- PASS only if a human-readable reason
+        AND the full per-module score breakdown are both present, not
+        just that the keys technically exist with empty values.
         """
-        return {"status": "PASS", "evidence": {}, "score": 88.0}
+        reason = decision.get("reason")
+        module_scores = decision.get("module_scores") or {}
+        expected_modules = {"pan", "ecm", "pfm", "sda"}
+        has_full_breakdown = expected_modules.issubset(module_scores.keys())
+        has_reason = isinstance(reason, str) and len(reason.strip()) > 0
+
+        passed = has_reason and has_full_breakdown
+        return {
+            "status": "PASS" if passed else "FAIL",
+            "evidence": {
+                "reason_present": has_reason,
+                "module_score_breakdown_present": has_full_breakdown,
+                "module_scores": module_scores,
+                "decision_reason": reason,
+                "methodology_endpoint": "GET /governance/scoring-methodology",
+            },
+            "score": 100.0 if passed else 0.0,
+        }
+
+    def _check_human_oversight(self, decision: Dict) -> Dict:
+        """
+        Article 14 (human oversight): a decision the pipeline itself
+        flagged with a critical governance-framework violation must
+        never be silently auto-approved. This is a real structural
+        invariant _make_decision() already enforces (cgc_loop.py) --
+        this check verifies it actually held for THIS decision, rather
+        than assuming the code is correct and never checking.
+        """
+        critical_violation = bool(decision.get("critical_framework_violated"))
+        outcome = decision.get("outcome")
+        violated_without_oversight = critical_violation and outcome == "APPROVE"
+
+        return {
+            "status": "FAIL" if violated_without_oversight else "PASS",
+            "evidence": {
+                "critical_framework_violated": critical_violation,
+                "outcome": outcome,
+                "human_review_required": decision.get("human_review_required"),
+                "invariant_checked": "critical_framework_violated implies outcome != APPROVE",
+            },
+            "score": 0.0 if violated_without_oversight else 100.0,
+        }
+
+    def _check_cybersecurity(self, decision: Dict) -> Dict:
+        """
+        Article 15 (accuracy, robustness, cybersecurity): is the decision
+        output cryptographically sealed and tamper-evident? Checks for a
+        real signature block (SCM.sign_artifact's actual output shape --
+        signature_id + data_hash), not just that a "signature" key exists.
+        """
+        signature = decision.get("signature") or {}
+        has_signature_id = bool(signature.get("signature_id"))
+        has_data_hash = bool(signature.get("data_hash"))
+        signed = has_signature_id and has_data_hash
+
+        return {
+            "status": "PASS" if signed else "FAIL",
+            "evidence": {
+                "signature_id_present": has_signature_id,
+                "data_hash_present": has_data_hash,
+                "key_id": signature.get("key_id"),
+            },
+            "score": 100.0 if signed else 0.0,
+        }
+
+    def _check_performance_logs(self, decision: Dict) -> Dict:
+        """
+        Article 12 (record-keeping/logging): does this system actually
+        have an active, wired automatic-logging capability? Checks the
+        real TCO module dependency this ComplianceEngine instance was
+        constructed with, rather than inspecting the decision payload
+        (TCO's own log_decision() call happens AFTER compliance
+        validation in cgc_loop.py's pipeline order, so the payload itself
+        never carries proof of its own future log entry).
+        """
+        tco_wired = self.tco is not None and hasattr(self.tco, "log_decision")
+
+        return {
+            "status": "PASS" if tco_wired else "FAIL",
+            "evidence": {
+                "tco_module_active": tco_wired,
+                "note": "Verifies the logging capability itself is wired and active, "
+                        "not this specific decision's own (not-yet-written) log entry.",
+            },
+            "score": 100.0 if tco_wired else 0.0,
+        }
+
+    def _check_ce_marking(self, decision: Dict) -> Dict:
+        """
+        Article 48 (CE marking): a physical/documentary conformity-
+        marking process performed once per product release by the
+        provider organization -- not something any runtime decision can
+        prove or disprove. Honestly MANUAL_REVIEW_REQUIRED.
+        """
+        return {
+            "status": "MANUAL_REVIEW_REQUIRED",
+            "evidence": {
+                "reason": "CE marking is an organizational conformity-assessment and "
+                          "documentation process, performed once per release -- not "
+                          "verifiable from a runtime decision payload.",
+            },
+            "score": None,
+        }
+
+    def _check_system_registry(self, decision: Dict) -> Dict:
+        """
+        Article 71 (EU database registration of high-risk AI systems):
+        a one-time regulatory filing, not a per-decision property.
+        Reports honestly based on whether the operator has recorded a
+        real registration (env var, set manually once actually filed)
+        instead of ever fabricating PASS.
+        """
+        registered = os.getenv("EU_AI_ACT_SYSTEM_REGISTERED", "").strip().lower() in ("true", "1", "yes")
+        return {
+            "status": "PASS" if registered else "MANUAL_REVIEW_REQUIRED",
+            "evidence": {
+                "eu_ai_act_system_registered_env_set": registered,
+                "reason": None if registered else (
+                    "No EU AI Act high-risk system registration recorded "
+                    "(EU_AI_ACT_SYSTEM_REGISTERED unset) -- a one-time regulatory "
+                    "filing, not something this pipeline can complete on its own."
+                ),
+            },
+            "score": 100.0 if registered else None,
+        }
 
 
 def integrate_with_cgc_loop(compliance_engine: ComplianceEngine):
