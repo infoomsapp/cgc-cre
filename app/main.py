@@ -1057,6 +1057,55 @@ async def get_module_metrics(
     else:
         return {"status": "active", "module": module_name}
 
+@app.get("/governance/scoring-methodology", tags=["Governance"])
+async def get_scoring_methodology(user=Depends(get_current_user)) -> Dict[str, Any]:
+    """
+    Explainability endpoint: the exact formula and every weight used to
+    turn PAN/ECM/PFM/SDA's four module scores into one approve/reject
+    decision, in one response an external auditor or acquirer can read
+    without having to be handed the source code.
+
+    Real, disclosed limitation (not silently glossed over): the weight
+    matrix returned here (DECISION_WEIGHTING_MATRIX, cgc_loop.py) is
+    still hardcoded in source and versioned only by git, NOT by
+    cgc_calibration_changelog the way the underlying PAN/ECM/PFM/SDA
+    per-area calibration is (see GET /calibration/{module}/{area} and
+    GET /calibration/changelog/list) -- promoting this matrix itself
+    into the same DB-backed, changelogged pattern is a larger, separate
+    change (this exact matrix is read on every single /governance/decision
+    call, unlike cgc_jla's calibration tables which nothing consumed
+    outside CGCDBLoader's own per-area lookups before this session).
+    """
+    return {
+        "aggregation_formula": (
+            "aggregated_score = min(1.0, "
+            "ecm_score*ecm_weight + pfm_score*pfm_weight + "
+            "pan_score*pan_weight + sda_score*sda_weight)"
+        ),
+        "decision_logic": (
+            "REJECT if a CRITICAL-severity ECM concern was found and this "
+            "area+sensitivity requires critical_framework_enforcement; "
+            "REQUIRE_HUMAN if require_human_review is set for this "
+            "area+sensitivity, or aggregated_score is within the "
+            "'gray zone' below approval_threshold; APPROVE if "
+            "aggregated_score >= approval_threshold and no critical "
+            "violation blocked it."
+        ),
+        "weighting_matrix": app.cgc_loop.weighting_matrix,
+        "weighting_matrix_source": {
+            "location": "app/modules/loop/cgc_loop.py:DECISION_WEIGHTING_MATRIX",
+            "versioned_by": "git (source control) only",
+            "note": "NOT yet backed by cgc_calibration_changelog -- a disclosed, "
+                    "known gap, not an oversight. The per-module calibration each "
+                    "of these weights is applied TO (base_frameworks, "
+                    "sensitivity_modulation, etc.) IS changelogged -- see "
+                    "module_calibration_changelog below.",
+        },
+        "module_calibration_changelog": "GET /calibration/changelog/list",
+        "module_calibration_current_value": "GET /calibration/{module}/{area} for module in ecm|pfm|sda|pan",
+    }
+
+
 @app.post("/audit/seal", tags=["Governance"])
 async def seal_governance_decision(
     payload: Dict[str, Any],
