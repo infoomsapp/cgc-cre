@@ -88,7 +88,7 @@ Optional:
 
 ## API surface
 
-Interactive docs at `/docs` (Swagger) once running. Key routes: `POST /governance/decision` (the main entry point), `POST /auth/signup` / `signin`, `GET /verify/{decision_id}` (unauthenticated forensic proof lookup, gated by knowing the decision_id + tenant), `GET /dashboard` (operator UI), `GET /health`.
+Interactive docs at `/docs` (Swagger) once running. Key routes: `POST /governance/decision` (the main entry point), `POST /auth/signup` / `signin`, `GET /verify/{decision_id}` (unauthenticated forensic proof lookup, gated by knowing the decision_id + tenant), `GET /dashboard` (operator UI), `GET /health`, `GET`/`PUT /calibration/{module}/{area}` + `GET /calibration/changelog/list` (versioned history of PAN/ECM/PFM/SDA scoring-rule changes — every update is admin-only and always changelogged in the same request, no code path updates calibration silently).
 
 ## Known gaps
 
@@ -97,10 +97,11 @@ These are the real, currently-unmitigated gaps as of 2026-09-11 — kept accurat
 - **No third-party security audit or penetration test.** Only internal self-testing has been done (SQL injection, auth bypass, rate-limiting, email-vector checks) — no independent firm has verified this.
 - **`AWS_KMS_MASTER_KEY_ID` isn't provisioned** — SCM signs locally, not through a FIPS-validated hardware boundary.
 - **No ISO/IEC 42001, SOC 2, or other independent certification.** ComplianceEngine evaluates against EU AI Act / NIST RMF criteria internally, but nothing here is externally certified.
-- **No versioned changelog for the PAN/ECM/PFM/SDA scoring rules** — calibration values live in `cgc_jla`, but changes to them aren't tracked the way LedgiProof Tax Pro's own tax-rule changes are.
 - **No third-party cryptographic audit of PoD/TCO's hash-chain design** — nothing external has verified it's actually tamper-resistant against an insider with direct Postgres access.
 - **Single-framework compliance only** (EU AI Act / NIST RMF) — no HIPAA, GLBA, or FINRA mapping yet.
 - **No self-serve tenant onboarding** — every `app_source`/API key is still issued manually by an admin via the Tenants dashboard; there's no public signup flow.
 - **Zero external paying customers.** Every current consumer (LedgiProof, LedgiProof Tax Pro, ControlMiles) is the same operator's own product — no independent market validation yet.
 
-Already mitigated, despite sometimes being assumed otherwise: a real automated test suite (32 tests across 7 files) and CI (GitHub Actions, running against a live Postgres service container on every push/PR to `main`) have existed since 2026-08-23 — not "verified live against production only."
+Already mitigated, despite sometimes being assumed otherwise:
+- A real automated test suite (37 tests across 8 files) and CI (GitHub Actions, running against a live Postgres service container on every push/PR to `main`) have existed since 2026-08-23 — not "verified live against production only."
+- A versioned changelog for the PAN/ECM/PFM/SDA scoring calibration (`cgc_calibration_changelog`, `/calibration/*` — see API surface above) has existed since 2026-09-11. Every change to a scoring rule is admin-only and requires a `reason`; nothing updates calibration without also writing its own history entry.

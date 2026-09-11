@@ -56,6 +56,11 @@ from api.v1.endpoints.launch_readiness import router as launch_readiness_router
 # of the CGC Core reinforcement plan).
 from api.v1.endpoints.flow_score import router as flow_score_router
 
+# Calibration-changelog router (versioned history for the PAN/ECM/PFM/SDA
+# scoring rules) -- read for any authenticated caller, write is admin-only
+# and always writes a changelog entry in the same request.
+from api.v1.endpoints.calibration import router as calibration_router
+
 # External guard (Phase 2 of the reinforcement plan) — distributed rate
 # limiting + payload signature checks.
 from app.modules.guard.rate_limiter import check_rate_limit
@@ -227,6 +232,15 @@ app.include_router(
 # comment for why writes here aren't further admin-gated.
 app.include_router(
     launch_readiness_router, prefix="/launch-readiness", tags=["Launch Readiness"],
+    dependencies=[Depends(get_current_user)]
+)
+
+# Mount the calibration-changelog router → /calibration/...
+# Base auth only get_current_user -- the PUT route further self-checks
+# role=="admin" internally (calibration.py's own _require_admin_principal,
+# not require_admin, to avoid a circular import against this file).
+app.include_router(
+    calibration_router, prefix="/calibration", tags=["Calibration"],
     dependencies=[Depends(get_current_user)]
 )
 

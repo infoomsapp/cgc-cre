@@ -12,6 +12,7 @@ import logging
 import hashlib
 from typing import Dict, Optional, List, Any
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from contextlib import contextmanager
 import threading
 import re
@@ -379,6 +380,21 @@ class Database:
         here (e.g. the DB role lacking CREATE SCHEMA) must never take
         down the whole application the way an unguarded exception did
         the first time this was tried.
+
+        NO LONGER DROPS THE SCHEMA (2026-09-11): the original version of
+        this method unconditionally ran DROP SCHEMA cgc_jla CASCADE before
+        recreating it, on the reasoning (below, kept for history) that
+        nothing real lived here yet. That stopped being true at some point
+        after this was written -- a live check found real per-area rows
+        (BANKING, LEGAL, RETAIL, AUDIT, FINANCE, HEALTHCARE) already
+        seeded across every cgc_jla table, not just DEFAULT. Re-running
+        this method with the old DROP CASCADE would have silently
+        destroyed that real calibration data (and, after this same
+        session's change, the cgc_calibration_changelog history recording
+        who changed it and why) the next time schema migrations are
+        re-run for any unrelated reason. Switched to CREATE SCHEMA/TABLE
+        IF NOT EXISTS throughout -- idempotent and non-destructive, same
+        posture as every other _create_*_schema method in this file.
         """
         if not self.use_postgres:
             return
@@ -387,19 +403,17 @@ class Database:
             with self.get_connection() as conn:
                 cur = conn.cursor()
 
-                # The first attempt at this (b558674) crashed the whole app on
-                # an unrelated bug (no try/except around this method), but
-                # under Supabase's pooled connection some of its CREATE TABLE
-                # statements still landed before the crash -- leaving tables
-                # that exist but are missing the UNIQUE constraints this
-                # method relies on for ON CONFLICT, which then fails on every
-                # retry ("no unique or exclusion constraint matching the ON
-                # CONFLICT specification"). Safe to drop and recreate clean:
-                # this schema has never been successfully used -- every
-                # module has been running on the Python-side fallback the
-                # entire time, so there is no real calibration data to lose.
-                cur.execute("DROP SCHEMA IF EXISTS cgc_jla CASCADE")
-                cur.execute("CREATE SCHEMA cgc_jla")
+                # Historical note (no longer how this method behaves --
+                # see the docstring above): the first attempt at this
+                # (b558674) crashed the whole app on an unrelated bug (no
+                # try/except around this method), but under Supabase's
+                # pooled connection some of its CREATE TABLE statements
+                # still landed before the crash -- leaving tables that
+                # exist but are missing the UNIQUE constraints this method
+                # relies on for ON CONFLICT, which then failed on every
+                # retry. Fixed at the time by dropping and recreating,
+                # which was safe only because nothing real lived here yet.
+                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_jla")
 
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS cgc_jla.ecm_calibration (
@@ -2135,6 +2149,235 @@ class Database:
         else:
             snapshots = self._read_json_list('launch_snapshot.json')
             return [r for r in snapshots if r.get('app_source') == app_source]
+
+    # ======================================================================
+    # CALIBRATION CHANGELOG (versioned history for PAN/ECM/PFM/SDA scoring rules)
+    # ======================================================================
+    # CGC Core's four scoring modules (PAN/ECM/PFM/SDA) read their governance
+    # calibration from cgc_jla.* (see CGCDBLoader) -- but until now nothing
+    # ever updated those rows outside the one-time seed in _create_jla_schema,
+    # and there was no record of who changed a value, when, or why. This
+    # applies the same versioned-rule-changelog discipline this project
+    # already requires of LedgiProof Tax Pro's own tax engines (rules.ts +
+    # changelog.ts per year) to CGC Core's own scoring calibration.
+    #
+    # Deliberately a flat table OUTSIDE the cgc_jla schema, not inside it:
+    # _create_jla_schema() unconditionally runs DROP SCHEMA cgc_jla CASCADE
+    # on every invocation (safe today only because nothing durable lived
+    # there yet -- see that method's own header comment). A changelog is
+    # exactly the kind of durable history that DROP CASCADE would silently
+    # destroy the next time cgc_jla is re-provisioned for an unrelated
+    # reason. A flat table with its own idempotent CREATE TABLE IF NOT
+    # EXISTS and no DROP is immune to that.
+
+    def _create_calibration_changelog_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_calibration_changelog (
+                        id              BIGSERIAL PRIMARY KEY,
+                        module          VARCHAR(20) NOT NULL,
+                        governance_area VARCHAR(50) NOT NULL,
+                        action_type     VARCHAR(50),
+                        previous_value  JSONB,
+                        new_value       JSONB NOT NULL,
+                        reason          TEXT NOT NULL,
+                        source_name     TEXT,
+                        source_url      TEXT,
+                        changed_by      VARCHAR(255) NOT NULL,
+                        changed_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_calibration_changelog_lookup
+                        ON cgc_calibration_changelog (module, governance_area)
+                """)
+                logger.info("Calibration changelog schema ready")
+        except Exception as e:
+            logger.warning(f"_create_calibration_changelog_schema failed (non-fatal): {e}")
+
+    # Registry of the 4 scoring modules' cgc_jla tables -- the single place
+    # that maps a module name to its real table/key/editable columns, so
+    # the generic get/update methods below never take a table or column
+    # name directly from caller input (only ever looks it up through here).
+    _CALIBRATION_MODULES: Dict[str, Dict[str, Any]] = {
+        "ecm": {
+            "table": "cgc_jla.ecm_calibration",
+            "key_columns": ["governance_area"],
+            "editable_columns": [
+                "base_frameworks", "sensitivity_modulation",
+                "compliance_owner_bonus", "critical_frameworks", "description",
+            ],
+        },
+        "pfm": {
+            "table": "cgc_jla.pfm_risk_models",
+            "key_columns": ["governance_area", "action_type"],
+            "editable_columns": [
+                "baseline_risk", "sensitivity_multiplier", "critical_factors",
+                "success_probability_baseline", "failure_modes",
+            ],
+        },
+        "sda": {
+            "table": "cgc_jla.sda_best_practices",
+            "key_columns": ["governance_area"],
+            "editable_columns": [
+                "data_requirements", "quality_factors",
+                "risk_mitigations", "optimization_priorities",
+            ],
+        },
+        "pan": {
+            "table": "cgc_jla.pan_domain_patterns",
+            "key_columns": ["governance_area"],
+            "editable_columns": ["keywords", "patterns", "sensitivity_multiplier"],
+        },
+    }
+
+    _CALIBRATION_JSONB_COLUMNS = {
+        "base_frameworks", "sensitivity_modulation", "critical_frameworks",
+        "critical_factors", "failure_modes", "data_requirements",
+        "quality_factors", "risk_mitigations", "optimization_priorities",
+        "keywords", "patterns",
+    }
+
+    def get_calibration_row(
+        self, module: str, governance_area: str, action_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Current calibration row for one module+area (+action_type for
+        pfm). Postgres-only -- cgc_jla itself has never had a JSON-fallback
+        mode (see _create_jla_schema)."""
+        cfg = self._CALIBRATION_MODULES.get(module)
+        if cfg is None or not self.use_postgres:
+            return None
+        where = ["governance_area = %s"]
+        params: List[Any] = [governance_area]
+        if "action_type" in cfg["key_columns"]:
+            where.append("action_type = %s")
+            params.append(action_type)
+        sql = f"SELECT * FROM {cfg['table']} WHERE {' AND '.join(where)} LIMIT 1"
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def update_calibration_row(
+        self, module: str, governance_area: str, fields: Dict[str, Any],
+        action_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Updates only the columns in `fields` that are actually editable
+        for this module (silently ignores anything else) and returns the
+        resulting row, or None if nothing matched. Caller is responsible
+        for writing the changelog entry -- this method only touches the
+        calibration table itself."""
+        cfg = self._CALIBRATION_MODULES.get(module)
+        if cfg is None or not self.use_postgres:
+            return None
+        editable = [k for k in fields if k in cfg["editable_columns"]]
+        if not editable:
+            return None
+        set_clause = ", ".join(f"{k} = %s" for k in editable)
+        set_params = [
+            Json(fields[k]) if k in self._CALIBRATION_JSONB_COLUMNS else fields[k]
+            for k in editable
+        ]
+        where = ["governance_area = %s"]
+        where_params: List[Any] = [governance_area]
+        if "action_type" in cfg["key_columns"]:
+            where.append("action_type = %s")
+            where_params.append(action_type)
+        sql = f"UPDATE {cfg['table']} SET {set_clause} WHERE {' AND '.join(where)} RETURNING *"
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, set_params + where_params)
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Recursively converts psycopg2's Decimal (returned for any NUMERIC
+        column, e.g. compliance_owner_bonus/sensitivity_multiplier) into
+        float, and anything else json.dumps already handles is passed
+        through untouched. Needed here because previous_value/new_value
+        are built directly from a RealDictCursor row and then re-serialized
+        via psycopg2.extras.Json() -- which uses stdlib json.dumps and has
+        no Decimal support of its own."""
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, dict):
+            return {k: Database._json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [Database._json_safe(v) for v in value]
+        return value
+
+    def record_calibration_change(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        previous_value = self._json_safe(entry.get("previous_value"))
+        new_value = self._json_safe(entry["new_value"])
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_calibration_changelog
+                            (module, governance_area, action_type, previous_value,
+                             new_value, reason, source_name, source_url, changed_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING *
+                    """, (
+                        entry["module"], entry["governance_area"], entry.get("action_type"),
+                        Json(previous_value), Json(new_value),
+                        entry["reason"], entry.get("source_name"), entry.get("source_url"),
+                        entry["changed_by"],
+                    ))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                entries = self._read_json_list('calibration_changelog.json')
+                now = datetime.now(timezone.utc).isoformat()
+                new_row = {
+                    'id': int(time.time() * 1000), 'module': entry["module"],
+                    'governance_area': entry["governance_area"], 'action_type': entry.get("action_type"),
+                    'previous_value': previous_value, 'new_value': new_value,
+                    'reason': entry["reason"], 'source_name': entry.get("source_name"),
+                    'source_url': entry.get("source_url"), 'changed_by': entry["changed_by"],
+                    'changed_at': now,
+                }
+                entries.append(new_row)
+                self._write_json_list('calibration_changelog.json', entries)
+                return new_row
+
+    def get_calibration_changelog(
+        self, module: Optional[str] = None, governance_area: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            where = []
+            params: List[Any] = []
+            if module:
+                where.append("module = %s")
+                params.append(module)
+            if governance_area:
+                where.append("governance_area = %s")
+                params.append(governance_area)
+            clause = f"WHERE {' AND '.join(where)}" if where else ""
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        f"SELECT * FROM cgc_calibration_changelog {clause} "
+                        f"ORDER BY changed_at DESC LIMIT %s",
+                        params + [limit]
+                    )
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            entries = self._read_json_list('calibration_changelog.json')
+            if module:
+                entries = [e for e in entries if e.get('module') == module]
+            if governance_area:
+                entries = [e for e in entries if e.get('governance_area') == governance_area]
+            entries.sort(key=lambda e: e.get('changed_at', ''), reverse=True)
+            return entries[:limit]
 
     # ======================================================================
     # ANALYTICS & LEARNING QUERIES

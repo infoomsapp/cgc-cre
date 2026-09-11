@@ -52,6 +52,7 @@ def db():
     database._create_tco_schema()
     database._create_guard_schema()
     database._create_auth_schema()
+    database._create_calibration_changelog_schema()
     return database
 
 
