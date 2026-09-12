@@ -203,6 +203,15 @@ async def saml_metadata() -> Response:
             "singleSignOnService": {"url": "https://placeholder.example.com", "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"},
             "x509cert": "",
         },
+        # Must match the real per-connection settings in _saml_settings()
+        # above -- otherwise a customer's IT admin reading this metadata
+        # sees a WEAKER requirement than what login/acs actually enforces.
+        "security": {
+            "authnRequestsSigned": False,
+            "wantAssertionsSigned": True,
+            "wantMessagesSigned": False,
+            "wantNameId": True,
+        },
     }
     saml_settings = OneLogin_Saml2_Settings(settings_dict, sp_validation_only=True)
     metadata_xml = saml_settings.get_sp_metadata()
