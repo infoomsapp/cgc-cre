@@ -66,12 +66,28 @@
   .brandIcon { width: 24px; height: 24px; display: block; flex-shrink: 0; }
   #app { display: none; max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; }
   header.top {
-    display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px;
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;
   }
   header.top h1 { font-size: 15px; margin: 0; letter-spacing: 0.02em; }
   header.top .sub { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
   header.top .right { display: flex; align-items: center; gap: 10px; }
   .logout { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; }
+
+  .appSwitcherRow { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .appSwitcherRow label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .appSwitcherRow select { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-family: var(--mono); font-size: 13px; padding: 7px 10px; border-radius: 6px; }
+  .appSwitcherRow .appName { font-family: var(--mono); font-size: 14px; font-weight: 700; }
+
+  .tabnav { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; flex-wrap: wrap; }
+  .tabnav button {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 6px; letter-spacing: 0.02em;
+    font-family: inherit;
+  }
+  .tabnav button:hover { color: var(--text); background: var(--panel-2); }
+  .tabnav button.active { color: #04140e; background: var(--accent); }
+  .tabPanel { display: none; }
+  .tabPanel.active { display: block; }
 
   section { margin-bottom: 24px; }
   section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
@@ -86,17 +102,18 @@
   .msg.err { color: var(--red); }
   .msg.ok { color: var(--green); }
 
-  .appCard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin-bottom: 14px; }
-  .appCardHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
-  .appName { font-family: var(--mono); font-size: 14px; font-weight: 700; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin-bottom: 14px; }
+  .cardHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
   .pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 100px; font-size: 10.5px; font-weight: 700; }
   .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; }
-  .pill.active { background: var(--green-bg); color: var(--green); }
-  .pill.active::before { background: var(--green); }
-  .pill.revoked, .pill.canceled, .pill.past_due { background: var(--red-bg); color: var(--red); }
-  .pill.revoked::before, .pill.canceled::before, .pill.past_due::before { background: var(--red); }
-  .pill.free { background: var(--panel-2); color: var(--muted); }
-  .pill.free::before { background: var(--muted); }
+  .pill.active, .pill.approve { background: var(--green-bg); color: var(--green); }
+  .pill.active::before, .pill.approve::before { background: var(--green); }
+  .pill.revoked, .pill.canceled, .pill.past_due, .pill.reject { background: var(--red-bg); color: var(--red); }
+  .pill.revoked::before, .pill.canceled::before, .pill.past_due::before, .pill.reject::before { background: var(--red); }
+  .pill.free, .pill.error { background: var(--panel-2); color: var(--muted); }
+  .pill.free::before, .pill.error::before { background: var(--muted); }
+  .pill.require_human { background: var(--amber-bg); color: var(--amber); }
+  .pill.require_human::before { background: var(--amber); }
   .appActions { display: flex; gap: 8px; flex-wrap: wrap; }
   .usageRow { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
   .usageBar { flex: 1; height: 6px; background: var(--panel-2); border-radius: 100px; overflow: hidden; }
@@ -104,8 +121,12 @@
   .usageBar .fill.warn { background: var(--amber); }
   .usageBar .fill.over { background: var(--red); }
   .warnBadge { display: inline-block; background: var(--amber-bg); color: var(--amber); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
-  .webhookRow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; flex-wrap: wrap; }
+  .flagBadge { display: inline-block; background: var(--red-bg); color: var(--red); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; margin-right: 4px; }
+  .webhookRow { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; flex-wrap: wrap; }
   .webhookUrl { color: var(--muted); font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+  .subtle { color: var(--muted); font-size: 11.5px; margin-top: 10px; }
+  .decisionId { font-family: var(--mono); font-size: 11.5px; color: var(--accent); text-decoration: none; }
+  .decisionId:hover { text-decoration: underline; }
 
   table { width: 100%; border-collapse: collapse; }
   .tablewrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
@@ -160,24 +181,97 @@
     </div>
   </header>
 
-  <section>
-    <h2>Claim a new app</h2>
-    <div class="formCard">
-      <div class="formRow">
-        <div class="fieldGroup">
-          <label for="newAppSource">App name (lowercase, letters/digits/hyphens)</label>
-          <input id="newAppSource" class="field" placeholder="e.g. my-app">
+  <div id="noAppsState">
+    <section>
+      <h2>Claim your first app</h2>
+      <div class="formCard">
+        <div class="formRow">
+          <div class="fieldGroup">
+            <label for="newAppSourceEmpty">App name (lowercase, letters/digits/hyphens)</label>
+            <input id="newAppSourceEmpty" class="field" placeholder="e.g. my-app">
+          </div>
+          <button class="btn" style="width:auto" onclick="claimApp('newAppSourceEmpty', 'claimMsgEmpty')">Claim &amp; issue key</button>
         </div>
-        <button class="btn" style="width:auto" onclick="claimApp()">Claim &amp; issue key</button>
+        <div class="msg" id="claimMsgEmpty"></div>
       </div>
-      <div class="msg" id="claimMsg"></div>
-    </div>
-  </section>
+    </section>
+  </div>
 
-  <section>
-    <h2>My Apps</h2>
-    <div id="appsList"></div>
-  </section>
+  <div id="hasAppsState" style="display:none">
+    <div class="appSwitcherRow" id="appSwitcherRow"></div>
+
+    <nav class="tabnav">
+      <button class="tabBtn active" data-tab="settings" onclick="setTab('settings')">Settings</button>
+      <button class="tabBtn" data-tab="keys" onclick="setTab('keys')">API Keys</button>
+      <button class="tabBtn" data-tab="webhooks" onclick="setTab('webhooks')">Webhooks</button>
+      <button class="tabBtn" data-tab="usage" onclick="setTab('usage')">Usage &amp; Billing</button>
+      <button class="tabBtn" data-tab="history" onclick="setTab('history')">Decision History</button>
+    </nav>
+
+    <div class="tabPanel active" id="tab-settings">
+      <section>
+        <h2>App</h2>
+        <div class="card" id="settingsAppInfo"></div>
+      </section>
+      <section>
+        <h2>Claim another app</h2>
+        <div class="formCard">
+          <div class="formRow">
+            <div class="fieldGroup">
+              <label for="newAppSource">App name (lowercase, letters/digits/hyphens)</label>
+              <input id="newAppSource" class="field" placeholder="e.g. my-app">
+            </div>
+            <button class="btn" style="width:auto" onclick="claimApp('newAppSource', 'claimMsg')">Claim &amp; issue key</button>
+          </div>
+          <div class="msg" id="claimMsg"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="tabPanel" id="tab-keys">
+      <section>
+        <h2>API Keys</h2>
+        <div class="card">
+          <div class="cardHead">
+            <span class="subtle">Keys for the selected app</span>
+            <button class="btn secondary small" onclick="regenerateKey(activeAppSource)">Regenerate key</button>
+          </div>
+          <div class="tablewrap">
+            <table>
+              <thead><tr><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody id="keysTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="tabPanel" id="tab-webhooks">
+      <section>
+        <h2>Webhook</h2>
+        <div class="card">
+          <div class="webhookRow" id="webhookRowContent"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="tabPanel" id="tab-usage">
+      <section>
+        <h2>Usage &amp; Billing</h2>
+        <div class="card">
+          <div class="cardHead" id="billingCardHead"></div>
+          <div id="usageBarContainer"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="tabPanel" id="tab-history">
+      <section>
+        <h2>Decision History</h2>
+        <div id="historyContent"></div>
+      </section>
+    </div>
+  </div>
 </div>
 
 <div class="modalBg" id="keyModal">
@@ -207,6 +301,10 @@
 <script>
 const API = window.location.origin;
 let TOKEN = localStorage.getItem('cgc_dash_token') || '';
+let apps = [];
+let webhooksBySource = {};
+let activeAppSource = null;
+let activeTab = 'settings';
 
 async function connectWithPassword(e) {
   e.preventDefault();
@@ -275,9 +373,9 @@ function closeKeyModal() {
   document.getElementById('keyModalValue').textContent = '';
 }
 
-async function claimApp() {
-  const appSource = document.getElementById('newAppSource').value.trim().toLowerCase();
-  const msgEl = document.getElementById('claimMsg');
+async function claimApp(inputId, msgId) {
+  const appSource = document.getElementById(inputId).value.trim().toLowerCase();
+  const msgEl = document.getElementById(msgId);
   msgEl.className = 'msg'; msgEl.textContent = '';
   if (!appSource) { msgEl.className = 'msg err'; msgEl.textContent = 'App name is required.'; return; }
   try {
@@ -286,7 +384,8 @@ async function claimApp() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_source: appSource }),
     });
-    document.getElementById('newAppSource').value = '';
+    document.getElementById(inputId).value = '';
+    activeAppSource = appSource;
     showKey(result.key);
     await refresh();
   } catch (e) {
@@ -296,6 +395,7 @@ async function claimApp() {
 }
 
 async function regenerateKey(appSource) {
+  if (!appSource) return;
   if (!confirm(`Regenerate the key for "${appSource}"? The old key stops working immediately.`)) return;
   try {
     const result = await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/keys/regenerate`, { method: 'POST' });
@@ -358,61 +458,149 @@ function usageBarHtml(usage) {
     </div>`;
 }
 
+// ---- Tabs ----
+function setTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.tabBtn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.tabPanel').forEach(p => p.classList.toggle('active', p.id === `tab-${tab}`));
+  renderActiveApp();
+}
+
+function setActiveApp(appSource) {
+  activeAppSource = appSource;
+  renderActiveApp();
+}
+
+function currentApp() {
+  return apps.find(a => a.app_source === activeAppSource) || null;
+}
+
+function renderAppSwitcher() {
+  const el = document.getElementById('appSwitcherRow');
+  if (apps.length <= 1) {
+    el.innerHTML = `<span class="appName">${esc(activeAppSource || '')}</span>`;
+    return;
+  }
+  el.innerHTML = `
+    <label for="appSwitcherSelect">App</label>
+    <select id="appSwitcherSelect" onchange="setActiveApp(this.value)">
+      ${apps.map(a => `<option value="${esc(a.app_source)}" ${a.app_source === activeAppSource ? 'selected' : ''}>${esc(a.app_source)}</option>`).join('')}
+    </select>`;
+}
+
+function renderActiveApp() {
+  const a = currentApp();
+  if (!a) return;
+  const wh = webhooksBySource[a.app_source] || { configured: false };
+
+  // Settings tab
+  document.getElementById('settingsAppInfo').innerHTML = `
+    <div class="cardHead">
+      <span class="appName" style="font-family:var(--mono); font-size:14px; font-weight:700;">${esc(a.app_source)}</span>
+      <span class="pill ${esc((a.plan || 'free').toLowerCase())}">${esc(a.plan || 'FREE')}</span>
+      <span class="pill ${esc(a.status || 'active')}">${esc(a.status || 'active')}</span>
+    </div>`;
+
+  // Keys tab
+  document.getElementById('keysTableBody').innerHTML = (a.keys || []).length ? (a.keys || []).map(k => `
+    <tr>
+      <td>${esc(k.key_prefix)}…${k.rotation_recommended ? '<span class="warnBadge">Rotate soon</span>' : ''}</td>
+      <td>${fmtDate(k.created_at)}</td>
+      <td>${fmtDate(k.last_used_at)}</td>
+      <td><span class="pill ${k.revoked_at ? 'revoked' : 'active'}">${k.revoked_at ? 'revoked' : 'active'}</span></td>
+      <td class="actions">${k.revoked_at ? '' : `<button class="btn danger small" onclick="revokeKey('${esc(a.app_source)}','${esc(k.id)}')">Revoke</button>`}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="5" class="empty">No keys yet</td></tr>';
+
+  // Webhooks tab
+  document.getElementById('webhookRowContent').innerHTML = `
+    ${wh.configured
+      ? `<span>Webhook: <span class="webhookUrl">${esc(wh.url)}</span>${wh.last_delivery_status ? ` — last delivery: ${esc(wh.last_delivery_status)}` : ''}</span>`
+      : '<span class="webhookUrl">No webhook configured</span>'}
+    <div class="appActions">
+      <button class="btn secondary small" onclick="openWebhookModal('${esc(a.app_source)}', '${wh.configured ? esc(wh.url) : ''}')">${wh.configured ? 'Edit' : 'Add webhook'}</button>
+      ${wh.configured ? `<button class="btn danger small" onclick="deleteWebhook('${esc(a.app_source)}')">Remove</button>` : ''}
+    </div>`;
+
+  // Usage & Billing tab
+  document.getElementById('billingCardHead').innerHTML = `
+    <span class="subtle">Plan: <span class="pill ${esc((a.plan || 'free').toLowerCase())}">${esc(a.plan || 'FREE')}</span></span>
+    <div class="appActions">
+      ${a.plan === 'FREE' || !a.plan ? `<button class="btn secondary small" onclick="upgradeApp('${esc(a.app_source)}')">Upgrade</button>` : `<button class="btn secondary small" onclick="manageBilling('${esc(a.app_source)}')">Manage billing</button>`}
+    </div>`;
+  document.getElementById('usageBarContainer').innerHTML = usageBarHtml(a.usage) || '<div class="empty">No usage data yet</div>';
+
+  // Decision History tab -- fetched lazily only when that tab is active
+  if (activeTab === 'history') {
+    loadDecisions(a.app_source);
+  }
+}
+
+const OUTCOME_PILL = { APPROVE: 'approve', REJECT: 'reject', REQUIRE_HUMAN: 'require_human', ERROR: 'error' };
+
+async function loadDecisions(appSource) {
+  const el = document.getElementById('historyContent');
+  el.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const data = await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/decisions`);
+    const entries = data.entries || [];
+    if (!entries.length) {
+      el.innerHTML = '<div class="empty">No decisions yet for this app.</div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Timestamp</th><th>Decision</th><th>Action</th><th>Area</th><th>Outcome</th><th>Score</th><th>Flags</th></tr></thead>
+          <tbody>
+            ${entries.map(e => `
+              <tr>
+                <td>${fmtDate(e.timestamp)}</td>
+                <td><a class="decisionId" href="/verify/${esc(e.decision_id)}" target="_blank">${esc(String(e.decision_id).slice(0, 14))}…</a></td>
+                <td>${esc(e.action)}</td>
+                <td>${esc(e.area)}</td>
+                <td><span class="pill ${OUTCOME_PILL[e.outcome] || 'error'}">${esc(e.outcome || '—')}</span></td>
+                <td>${e.aggregated_score != null ? Number(e.aggregated_score).toFixed(3) : '—'}</td>
+                <td>${e.critical_framework_violated ? '<span class="flagBadge">critical</span>' : ''}${e.human_review_required ? '<span class="flagBadge">human review</span>' : ''}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${data.truncated ? `<div class="subtle">Showing the most recent ${entries.length} decisions.</div>` : ''}
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="empty">Error loading decisions: ${esc(e.message)}</div>`;
+  }
+}
+
 async function refresh() {
   try {
     const data = await api('/tenants/my-apps');
-    const apps = data.apps || [];
+    apps = data.apps || [];
 
-    const webhooks = {};
+    if (!apps.length) {
+      document.getElementById('noAppsState').style.display = 'block';
+      document.getElementById('hasAppsState').style.display = 'none';
+      return;
+    }
+    document.getElementById('noAppsState').style.display = 'none';
+    document.getElementById('hasAppsState').style.display = 'block';
+
+    if (!activeAppSource || !apps.some(a => a.app_source === activeAppSource)) {
+      activeAppSource = apps[0].app_source;
+    }
+
+    webhooksBySource = {};
     await Promise.all(apps.map(async a => {
-      try { webhooks[a.app_source] = await api(`/tenants/my-apps/${encodeURIComponent(a.app_source)}/webhook`); }
-      catch (e) { webhooks[a.app_source] = { configured: false }; }
+      try { webhooksBySource[a.app_source] = await api(`/tenants/my-apps/${encodeURIComponent(a.app_source)}/webhook`); }
+      catch (e) { webhooksBySource[a.app_source] = { configured: false }; }
     }));
 
-    document.getElementById('appsList').innerHTML = apps.length ? apps.map(a => {
-      const wh = webhooks[a.app_source] || { configured: false };
-      return `
-      <div class="appCard">
-        <div class="appCardHead">
-          <span class="appName">${esc(a.app_source)}</span>
-          <span class="pill ${esc((a.plan || 'free').toLowerCase())}">${esc(a.plan || 'FREE')}</span>
-          <span class="pill ${esc(a.status || 'active')}">${esc(a.status || 'active')}</span>
-          <div class="appActions">
-            ${a.plan === 'FREE' || !a.plan ? `<button class="btn secondary small" onclick="upgradeApp('${esc(a.app_source)}')">Upgrade</button>` : `<button class="btn secondary small" onclick="manageBilling('${esc(a.app_source)}')">Manage billing</button>`}
-            <button class="btn secondary small" onclick="regenerateKey('${esc(a.app_source)}')">Regenerate key</button>
-          </div>
-        </div>
-        ${usageBarHtml(a.usage)}
-        <div class="tablewrap">
-          <table>
-            <thead><tr><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${(a.keys || []).map(k => `
-                <tr>
-                  <td>${esc(k.key_prefix)}…${k.rotation_recommended ? '<span class="warnBadge">Rotate soon</span>' : ''}</td>
-                  <td>${fmtDate(k.created_at)}</td>
-                  <td>${fmtDate(k.last_used_at)}</td>
-                  <td><span class="pill ${k.revoked_at ? 'revoked' : 'active'}">${k.revoked_at ? 'revoked' : 'active'}</span></td>
-                  <td class="actions">${k.revoked_at ? '' : `<button class="btn danger small" onclick="revokeKey('${esc(a.app_source)}','${esc(k.id)}')">Revoke</button>`}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-        <div class="webhookRow">
-          ${wh.configured
-            ? `<span>Webhook: <span class="webhookUrl">${esc(wh.url)}</span>${wh.last_delivery_status ? ` — last delivery: ${esc(wh.last_delivery_status)}` : ''}</span>`
-            : '<span class="webhookUrl">No webhook configured</span>'}
-          <div class="appActions">
-            <button class="btn secondary small" onclick="openWebhookModal('${esc(a.app_source)}', '${wh.configured ? esc(wh.url) : ''}')">${wh.configured ? 'Edit' : 'Add webhook'}</button>
-            ${wh.configured ? `<button class="btn danger small" onclick="deleteWebhook('${esc(a.app_source)}')">Remove</button>` : ''}
-          </div>
-        </div>
-      </div>
-    `;
-    }).join('') : '<div class="empty">No apps yet — claim one above.</div>';
+    renderAppSwitcher();
+    renderActiveApp();
   } catch (e) {
-    document.getElementById('appsList').innerHTML = `<div class="empty">Error loading apps: ${esc(e.message)}</div>`;
+    document.getElementById('hasAppsState').innerHTML = `<div class="empty">Error loading apps: ${esc(e.message)}</div>`;
   }
 }
 

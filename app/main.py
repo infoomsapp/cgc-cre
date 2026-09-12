@@ -873,6 +873,40 @@ async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any])
         logger.warning(f"[webhook] recording delivery status failed (non-fatal): {e}")
 
 
+@app.get("/tenants/my-apps/{app_source}/decisions", tags=["Admin"])
+async def get_my_decisions(
+    app_source: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Customer-facing decision history -- the backend for /dashboard/
+    account's Decision History tab. Reuses TCO's existing
+    get_audit_trail_by_app() (the same method GET /governance/reports/
+    {app_source} already calls before rendering its PDF) rather than a
+    new query. Ownership-checked like every other /tenants/my-apps/
+    route -- deliberately NOT the ALLOWED_APP_SOURCES check
+    /governance/reports/{app_source} uses, since that endpoint is
+    operator-only for the 3 first-party apps and a self-service tenant's
+    app_source is never in that allowlist.
+
+    No offset/cursor pagination exists on get_audit_trail_by_app -- capped
+    at the 100 most recent decisions (block_number DESC), with the
+    underlying "truncated" flag surfaced as-is rather than silently
+    dropped, same honesty standard as the PDF report's own use of it.
+    """
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+
+    if not to_date:
+        to_date = datetime.now(timezone.utc).date().isoformat()
+    if not from_date:
+        from_date = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
+
+    return app.tco.get_audit_trail_by_app(app_source, from_date, to_date, limit=100)
+
+
 # =========================
 # STRIPE BILLING (Gap 2 -- CGC Core billing ITS OWN tenants, not any of the
 # first-party apps' own end-user billing, which is entirely separate)
