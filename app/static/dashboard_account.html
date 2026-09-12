@@ -153,6 +153,12 @@
     <p>Sign in with your CGC Core account to manage your own apps and API keys.</p>
     <a href="/auth/google/login" class="btn secondary" id="googleLoginBtn" style="display:none; text-decoration:none; margin-bottom:14px; text-align:center;">Continue with Google</a>
     <div class="divider" id="googleDivider" style="display:none">or</div>
+    <div id="ssoRow" style="display:flex; gap:8px; margin-bottom:6px;">
+      <input id="ssoEmailInput" type="email" placeholder="Work email" style="flex:1; margin-bottom:0;">
+      <button type="button" class="btn secondary" style="width:auto; white-space:nowrap;" onclick="startSsoLogin()">Continue with SSO</button>
+    </div>
+    <div class="err" id="ssoErr" style="margin-bottom:10px;"></div>
+    <div class="divider">or</div>
     <form id="loginForm">
       <input id="emailInput" type="email" placeholder="Email" autocomplete="username" required>
       <input id="passwordInput" type="password" placeholder="Password" autocomplete="current-password" required>
@@ -691,6 +697,25 @@ async function initGoogleLoginButton() {
   } catch (e) { /* button just stays hidden -- not fatal */ }
 }
 initGoogleLoginButton();
+
+async function startSsoLogin() {
+  const email = document.getElementById('ssoEmailInput').value.trim();
+  const errEl = document.getElementById('ssoErr');
+  errEl.textContent = '';
+  if (!email || !email.includes('@')) { errEl.textContent = 'Enter your work email first.'; return; }
+  try {
+    const result = await fetch(API + '/auth/saml/lookup?email=' + encodeURIComponent(email)).then(r => r.json());
+    if (!result.available) {
+      errEl.textContent = "SSO isn't set up for your organization yet.";
+      return;
+    }
+    // Full-page navigation, not fetch -- this needs to leave CGC Core
+    // entirely and land on the customer's own Identity Provider.
+    window.location.href = '/auth/saml/' + encodeURIComponent(result.domain) + '/login';
+  } catch (e) {
+    errEl.textContent = 'Could not reach the server: ' + e.message;
+  }
+}
 
 if (TOKEN) boot();
 </script>

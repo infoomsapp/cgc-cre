@@ -54,6 +54,7 @@ def main() -> None:
         ("_create_launch_readiness_schema", db._create_launch_readiness_schema),
         ("_create_calibration_changelog_schema", db._create_calibration_changelog_schema),
         ("_create_tenant_webhooks_schema", db._create_tenant_webhooks_schema),
+        ("_create_saml_connections_schema", db._create_saml_connections_schema),
     ]
 
     for name, step in steps:

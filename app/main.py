@@ -70,6 +70,11 @@ from api.v1.endpoints.calibration import router as calibration_router
 # same as /auth/signup and /auth/signin.
 from api.v1.endpoints.oauth_google import router as oauth_google_router
 
+# SAML enterprise SSO (Okta/Azure AD/OneLogin) -- one connection per
+# customer email domain, admin-provisioned. Same no-auth-dependency
+# posture as oauth_google_router: these are login entry points.
+from api.v1.endpoints.saml_sso import router as saml_sso_router
+
 # External guard (Phase 2 of the reinforcement plan) — distributed rate
 # limiting + payload signature checks.
 from app.modules.guard.rate_limiter import check_rate_limit
@@ -452,6 +457,11 @@ async def signin(data: SignIn, request: Request):
 # get_current_user dependency, since the caller isn't authenticated yet.
 app.include_router(oauth_google_router, prefix="/auth/google", tags=["Auth"])
 
+# Enterprise SAML SSO -- same posture: no auth dependency, these are the
+# login entry points (/auth/saml/lookup, /{domain}/login, /{domain}/acs,
+# /auth/saml/metadata).
+app.include_router(saml_sso_router, prefix="/auth/saml", tags=["Auth"])
+
 @app.get("/admin/users", tags=["Admin"])
 async def list_users(user=Depends(require_admin)):
     return app.auth.list_users()
@@ -576,6 +586,32 @@ async def list_api_keys(app_source: Optional[str] = None, user=Depends(require_a
 @app.post("/admin/api-keys/{key_id}/revoke", tags=["Admin"])
 async def revoke_api_key(key_id: str, user=Depends(require_admin)) -> Dict[str, Any]:
     return app.auth.revoke_api_key(key_id)
+
+
+# Enterprise SAML SSO connections -- admin-provisioned (require_admin), not
+# self-service. See api/v1/endpoints/saml_sso.py's header comment for why:
+# a malformed cert/URL from a customer's IT admin silently locks their
+# whole company out of login, so onboarding a real connection is
+# realistically a white-glove, hands-on setup for this pass.
+class SamlConnectionIn(BaseModel):
+    domain: str
+    idp_entity_id: str
+    idp_sso_url: str
+    idp_x509_cert: str
+
+
+@app.post("/admin/saml-connections", tags=["Admin"])
+async def create_saml_connection(payload: SamlConnectionIn, user=Depends(require_admin)) -> Dict[str, Any]:
+    domain = payload.domain.strip().lower()
+    return app.db.save_saml_connection(
+        domain, payload.idp_entity_id.strip(), payload.idp_sso_url.strip(),
+        payload.idp_x509_cert.strip(), created_by=user["email"],
+    )
+
+
+@app.get("/admin/saml-connections", tags=["Admin"])
+async def list_saml_connections(user=Depends(require_admin)) -> Dict[str, Any]:
+    return {"connections": app.db.list_saml_connections()}
 
 # =========================
 # SELF-SERVE TENANT ONBOARDING (was a real, disclosed gap: every

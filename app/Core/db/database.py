@@ -2151,6 +2151,103 @@ class Database:
             return [r for r in snapshots if r.get('app_source') == app_source]
 
     # ======================================================================
+    # SAML CONNECTIONS (enterprise SSO, one Identity Provider per customer domain)
+    # ======================================================================
+    # Unlike Google OIDC (one app-wide Client ID that works for any Google
+    # account), SAML has no global equivalent -- each enterprise customer's
+    # Okta/Azure AD/OneLogin tenant is its own Identity Provider with its
+    # own Entity ID, SSO URL, and signing certificate. One row per email
+    # domain (see api/v1/endpoints/saml_sso.py). Admin-provisioned for this
+    # pass, not self-service -- see that router's own header comment.
+    # Flat table, same convention as cgc_tenant_webhooks below: no
+    # destructive DROP, best-effort provisioning.
+
+    def _create_saml_connections_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_saml_connections (
+                        id              BIGSERIAL PRIMARY KEY,
+                        domain          VARCHAR(255) NOT NULL UNIQUE,
+                        idp_entity_id   TEXT NOT NULL,
+                        idp_sso_url     TEXT NOT NULL,
+                        idp_x509_cert   TEXT NOT NULL,
+                        active          BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_by      VARCHAR(255),
+                        created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                logger.info("SAML connections schema ready")
+        except Exception as e:
+            logger.warning(f"_create_saml_connections_schema failed (non-fatal): {e}")
+
+    def save_saml_connection(self, domain: str, idp_entity_id: str, idp_sso_url: str, idp_x509_cert: str, created_by: str) -> Dict[str, Any]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_saml_connections
+                            (domain, idp_entity_id, idp_sso_url, idp_x509_cert, created_by, active)
+                        VALUES (%s, %s, %s, %s, %s, TRUE)
+                        ON CONFLICT (domain) DO UPDATE SET
+                            idp_entity_id = EXCLUDED.idp_entity_id,
+                            idp_sso_url = EXCLUDED.idp_sso_url,
+                            idp_x509_cert = EXCLUDED.idp_x509_cert,
+                            active = TRUE, updated_at = NOW()
+                        RETURNING *
+                    """, (domain, idp_entity_id, idp_sso_url, idp_x509_cert, created_by))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                conns = self._read_json_list('saml_connections.json')
+                now = datetime.now(timezone.utc).isoformat()
+                for r in conns:
+                    if r.get('domain') == domain:
+                        r.update({
+                            'idp_entity_id': idp_entity_id, 'idp_sso_url': idp_sso_url,
+                            'idp_x509_cert': idp_x509_cert, 'active': True, 'updated_at': now,
+                        })
+                        self._write_json_list('saml_connections.json', conns)
+                        return r
+                new_row = {
+                    'domain': domain, 'idp_entity_id': idp_entity_id, 'idp_sso_url': idp_sso_url,
+                    'idp_x509_cert': idp_x509_cert, 'active': True, 'created_by': created_by,
+                    'created_at': now, 'updated_at': now,
+                }
+                conns.append(new_row)
+                self._write_json_list('saml_connections.json', conns)
+                return new_row
+
+    def get_saml_connection(self, domain: str) -> Optional[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT * FROM cgc_saml_connections WHERE domain = %s AND active = TRUE", (domain,)
+                    )
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            for r in self._read_json_list('saml_connections.json'):
+                if r.get('domain') == domain and r.get('active'):
+                    return r
+            return None
+
+    def list_saml_connections(self) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM cgc_saml_connections ORDER BY domain")
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            return self._read_json_list('saml_connections.json')
+
+    # ======================================================================
     # TENANT WEBHOOKS (self-service outbound notifications, per app_source)
     # ======================================================================
     # One row per app_source (upsert, not a history table) -- a customer

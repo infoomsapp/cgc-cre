@@ -54,6 +54,7 @@ def db():
     database._create_auth_schema()
     database._create_calibration_changelog_schema()
     database._create_tenant_webhooks_schema()
+    database._create_saml_connections_schema()
     return database
 
 
