@@ -151,6 +151,8 @@
   <div class="card">
     <h1>My Account</h1>
     <p>Sign in with your CGC Core account to manage your own apps and API keys.</p>
+    <a href="/auth/google/login" class="btn secondary" id="googleLoginBtn" style="display:none; text-decoration:none; margin-bottom:14px; text-align:center;">Continue with Google</a>
+    <div class="divider" id="googleDivider" style="display:none">or</div>
     <form id="loginForm">
       <input id="emailInput" type="email" placeholder="Email" autocomplete="username" required>
       <input id="passwordInput" type="password" placeholder="Password" autocomplete="current-password" required>
@@ -663,6 +665,32 @@ async function boot() {
   }
   refresh();
 }
+
+// Google OIDC: /auth/google/callback redirects here with the session
+// token in the URL FRAGMENT (#token=...), never a query param, so it's
+// never sent to the server on subsequent requests or logged there --
+// see oauth_google.py's own header comment for why. Pick it up once,
+// store it the same way a normal signin does, then scrub it from the
+// visible URL/history.
+(function pickUpGoogleLoginToken() {
+  const hash = window.location.hash;
+  if (!hash.startsWith('#token=')) return;
+  const token = decodeURIComponent(hash.slice('#token='.length));
+  TOKEN = token;
+  localStorage.setItem('cgc_dash_token', token);
+  history.replaceState(null, '', window.location.pathname + window.location.search);
+})();
+
+async function initGoogleLoginButton() {
+  try {
+    const status = await fetch(API + '/auth/google/status').then(r => r.json());
+    if (status.configured) {
+      document.getElementById('googleLoginBtn').style.display = 'block';
+      document.getElementById('googleDivider').style.display = 'flex';
+    }
+  } catch (e) { /* button just stays hidden -- not fatal */ }
+}
+initGoogleLoginButton();
 
 if (TOKEN) boot();
 </script>

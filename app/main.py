@@ -65,6 +65,11 @@ from api.v1.endpoints.flow_score import router as flow_score_router
 # and always writes a changelog entry in the same request.
 from api.v1.endpoints.calibration import router as calibration_router
 
+# Google OIDC login ("Continue with Google") for /dashboard/account --
+# these ARE login entry points, mounted with no auth dependency below,
+# same as /auth/signup and /auth/signin.
+from api.v1.endpoints.oauth_google import router as oauth_google_router
+
 # External guard (Phase 2 of the reinforcement plan) — distributed rate
 # limiting + payload signature checks.
 from app.modules.guard.rate_limiter import check_rate_limit
@@ -441,6 +446,11 @@ async def signin(data: SignIn, request: Request):
         raise HTTPException(status_code=401, detail=result["error"])
 
     return {"access_token": result["token"], "token_type": "bearer", "user": result["user"]}
+
+# Google OIDC login ("Continue with Google") -- these ARE login entry
+# points, same posture as /auth/signup and /auth/signin above: no
+# get_current_user dependency, since the caller isn't authenticated yet.
+app.include_router(oauth_google_router, prefix="/auth/google", tags=["Auth"])
 
 @app.get("/admin/users", tags=["Admin"])
 async def list_users(user=Depends(require_admin)):

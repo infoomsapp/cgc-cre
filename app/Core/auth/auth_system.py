@@ -734,6 +734,56 @@ class AuthSystem:
             },
         }
 
+    def login_federated(self, email: str, ip: str = None) -> Dict:
+        """
+        Issue a real session for an email already verified by a trusted
+        external identity provider (Google OIDC -- see
+        api/v1/endpoints/oauth_google.py) -- no password check, since the
+        IdP already proved the caller controls that email. Auto-provisions
+        the account on first federated login: cgc_auth.users.password_hash
+        is NOT NULL, so a brand-new row still needs *a* hash -- generated
+        here from an unguessable random string via the same create_user()
+        path a normal signup uses, making the password route permanently
+        unusable for this account (nobody knows the random value) while
+        still satisfying the schema. Mirrors login()'s session-issuing
+        tail exactly (token/session/last_login) but skips password
+        verification and the password-specific brute-force/credential-
+        stuffing counters, which don't apply to an already-IdP-verified
+        identity. Still honors is_blocked()/active -- those protect the
+        account regardless of which auth method reached it.
+        """
+        if self.is_blocked(ip=ip, email=email):
+            return {"success": False, "error": "Access denied", "blocked": True}
+
+        user = self._get_user(email)
+        if user is None:
+            created = self.create_user(
+                email, secrets.token_urlsafe(48), role="user", created_by="oidc:google"
+            )
+            if not created.get("success"):
+                return {"success": False, "error": created.get("error", "Could not create account")}
+            user = self._get_user(email)
+        elif not user.get("active", True):
+            return {"success": False, "error": "Account disabled"}
+
+        new_login_count = (user.get("login_count") or 0) + 1
+        self._update_user(email, last_login=datetime.now(timezone.utc).isoformat(), login_count=new_login_count)
+
+        token = self._create_token(email, user["role"])
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        self._insert_session(token, email, user["role"], expires_at, ip)
+
+        logger.info(f"[auth] federated login successful: {email} (google)")
+
+        return {
+            "success": True,
+            "token": token,
+            "user": {
+                "email": email,
+                "role": user["role"],
+            },
+        }
+
     def verify_token(self, token: str) -> Optional[Dict]:
         """Verify token and return user info, or None if invalid/expired."""
         # Service-to-service auth: a first-party static API key (LedgiProof, etc.).
