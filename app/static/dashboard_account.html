@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CGC Core — My Account</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/img/cgc_favicon_32.png">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/img/cgc_favicon_64.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/img/cgc_favicon_180.png">
+<style>
+  :root {
+    --bg: #0b0f0e;
+    --panel: #121816;
+    --panel-2: #171f1c;
+    --border: #253430;
+    --text: #e6efe9;
+    --muted: #7d9089;
+    --accent: #4fd8a8;
+    --accent-dim: rgba(79,216,168,0.12);
+    --red: #ea8a78;
+    --red-bg: rgba(234,138,120,0.12);
+    --amber: #e8b454;
+    --amber-bg: rgba(232,180,84,0.12);
+    --green: #4ed892;
+    --green-bg: rgba(78,216,146,0.12);
+    --mono: ui-monospace, "SF Mono", Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+  }
+  #gate {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 60px; padding: 24px;
+  }
+  #gate .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 40px 36px; width: 100%; max-width: 400px;
+  }
+  #gate h1 { font-size: 16px; margin: 0 0 4px; letter-spacing: 0.02em; }
+  #gate p { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+  #gate input {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--mono);
+    font-size: 12.5px; margin-bottom: 10px;
+  }
+  #gate button, .btn {
+    background: var(--accent); color: #04140e; border: none; border-radius: 6px;
+    padding: 9px 14px; font-weight: 700; font-size: 12.5px; cursor: pointer; width: 100%;
+  }
+  .btn.secondary { background: none; border: 1px solid var(--border); color: var(--text); }
+  .btn.small { width: auto; padding: 5px 10px; font-size: 11px; }
+  .btn.danger { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); }
+  #gate .err { color: var(--red); font-size: 12px; margin-top: 8px; min-height: 16px; }
+  #gate form { display: flex; flex-direction: column; gap: 10px; }
+  #gate .divider { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  #gate .divider::before, #gate .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  #gate .linkBtn { background: none; border: none; color: var(--muted); font-size: 11.5px; cursor: pointer; padding: 0; width: auto; font-weight: 600; text-decoration: underline; }
+  #gate .linkBtn:hover { color: var(--text); }
+  #gate .tokenRow { display: none; flex-direction: column; gap: 10px; margin-top: 12px; }
+  #gate .tokenRow.show { display: flex; }
+  #gate .gateLogo { display: block; width: 100%; max-width: 220px; height: auto; }
+  .brandRow { display: flex; align-items: center; gap: 9px; }
+  .brandIcon { width: 24px; height: 24px; display: block; flex-shrink: 0; }
+  #app { display: none; max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; }
+  header.top {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px;
+  }
+  header.top h1 { font-size: 15px; margin: 0; letter-spacing: 0.02em; }
+  header.top .sub { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
+  header.top .right { display: flex; align-items: center; gap: 10px; }
+  .logout { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; }
+
+  section { margin-bottom: 24px; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+  .empty { color: var(--muted); font-size: 12.5px; padding: 20px; text-align: center; }
+
+  .formCard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .formRow { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .fieldGroup { display: flex; flex-direction: column; gap: 4px; }
+  .fieldGroup label { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .field { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--mono); font-size: 12.5px; min-width: 200px; }
+  .msg { font-size: 12px; margin-top: 10px; min-height: 16px; }
+  .msg.err { color: var(--red); }
+  .msg.ok { color: var(--green); }
+
+  .appCard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin-bottom: 14px; }
+  .appCardHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+  .appName { font-family: var(--mono); font-size: 14px; font-weight: 700; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 100px; font-size: 10.5px; font-weight: 700; }
+  .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; }
+  .pill.active { background: var(--green-bg); color: var(--green); }
+  .pill.active::before { background: var(--green); }
+  .pill.revoked, .pill.canceled, .pill.past_due { background: var(--red-bg); color: var(--red); }
+  .pill.revoked::before, .pill.canceled::before, .pill.past_due::before { background: var(--red); }
+  .pill.free { background: var(--panel-2); color: var(--muted); }
+  .pill.free::before { background: var(--muted); }
+  .appActions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  table { width: 100%; border-collapse: collapse; }
+  .tablewrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; white-space: nowrap; }
+  th { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; background: var(--panel-2); }
+  tr:last-child td { border-bottom: none; }
+  td.actions { display: flex; gap: 6px; }
+
+  .modalBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; z-index: 10; padding: 20px; }
+  .modalBg.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 24px; max-width: 480px; width: 100%; }
+  .modal h3 { margin: 0 0 8px; font-size: 14px; }
+  .modal p { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+  .keyBox { background: var(--panel-2); border: 1px solid var(--accent); border-radius: 6px; padding: 12px; font-family: var(--mono); font-size: 12px; word-break: break-all; margin-bottom: 14px; }
+  .modal .warn { color: var(--amber); font-size: 11.5px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <img src="/static/img/cgc_logo.png" alt="CGC Core" class="gateLogo">
+  <div class="card">
+    <h1>My Account</h1>
+    <p>Sign in with your CGC Core account to manage your own apps and API keys.</p>
+    <form id="loginForm">
+      <input id="emailInput" type="email" placeholder="Email" autocomplete="username" required>
+      <input id="passwordInput" type="password" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+    <div class="divider">or</div>
+    <button type="button" class="linkBtn" id="tokenToggle">Use an API token instead</button>
+    <div class="tokenRow" id="tokenRow">
+      <input id="keyInput" type="password" placeholder="Token" autocomplete="off">
+      <button type="button" onclick="connectToken()">Connect with token</button>
+    </div>
+    <div class="err" id="gateErr"></div>
+  </div>
+</div>
+
+<div id="app">
+  <header class="top">
+    <div class="brandRow">
+      <img src="/static/img/cgc_icon.png" alt="" class="brandIcon">
+      <div>
+        <h1>My Account</h1>
+        <div class="sub">cgc-cre.vercel.app</div>
+      </div>
+    </div>
+    <div class="right">
+      <button class="logout" onclick="disconnect()">Sign out</button>
+    </div>
+  </header>
+
+  <section>
+    <h2>Claim a new app</h2>
+    <div class="formCard">
+      <div class="formRow">
+        <div class="fieldGroup">
+          <label for="newAppSource">App name (lowercase, letters/digits/hyphens)</label>
+          <input id="newAppSource" class="field" placeholder="e.g. my-app">
+        </div>
+        <button class="btn" style="width:auto" onclick="claimApp()">Claim &amp; issue key</button>
+      </div>
+      <div class="msg" id="claimMsg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>My Apps</h2>
+    <div id="appsList"></div>
+  </section>
+</div>
+
+<div class="modalBg" id="keyModal">
+  <div class="modal">
+    <h3>API key</h3>
+    <p>This is the only time the full key is shown — it can't be recovered later, only revoked and replaced.</p>
+    <div class="keyBox" id="keyModalValue"></div>
+    <div class="warn">Copy it now and store it securely.</div>
+    <button class="btn" onclick="closeKeyModal()">Done</button>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let TOKEN = localStorage.getItem('cgc_dash_token') || '';
+
+async function connectWithPassword(e) {
+  e.preventDefault();
+  const email = document.getElementById('emailInput').value.trim();
+  const password = document.getElementById('passwordInput').value;
+  if (!email || !password) return;
+  document.getElementById('gateErr').textContent = '';
+  try {
+    const r = await fetch(API + '/auth/signin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'Sign in failed');
+    TOKEN = data.access_token;
+    localStorage.setItem('cgc_dash_token', TOKEN);
+    boot();
+  } catch (err) {
+    document.getElementById('gateErr').textContent = err.message;
+  }
+}
+document.getElementById('loginForm').addEventListener('submit', connectWithPassword);
+document.getElementById('tokenToggle').addEventListener('click', () => {
+  document.getElementById('tokenRow').classList.toggle('show');
+});
+
+function connectToken() {
+  const v = document.getElementById('keyInput').value.trim();
+  if (!v) return;
+  TOKEN = v;
+  localStorage.setItem('cgc_dash_token', v);
+  boot();
+}
+function disconnect() {
+  localStorage.removeItem('cgc_dash_token');
+  TOKEN = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('gate').style.display = 'flex';
+}
+
+async function api(path, options) {
+  const r = await fetch(API + path, {
+    ...options,
+    headers: { 'Authorization': 'Bearer ' + TOKEN, ...(options && options.headers) },
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+  return data;
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtDate(s) {
+  if (!s) return '—';
+  return String(s).slice(0, 19).replace('T', ' ');
+}
+
+function showKey(key) {
+  document.getElementById('keyModalValue').textContent = key;
+  document.getElementById('keyModal').classList.add('show');
+}
+function closeKeyModal() {
+  document.getElementById('keyModal').classList.remove('show');
+  document.getElementById('keyModalValue').textContent = '';
+}
+
+async function claimApp() {
+  const appSource = document.getElementById('newAppSource').value.trim().toLowerCase();
+  const msgEl = document.getElementById('claimMsg');
+  msgEl.className = 'msg'; msgEl.textContent = '';
+  if (!appSource) { msgEl.className = 'msg err'; msgEl.textContent = 'App name is required.'; return; }
+  try {
+    const result = await api('/tenants/self-signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_source: appSource }),
+    });
+    document.getElementById('newAppSource').value = '';
+    showKey(result.key);
+    await refresh();
+  } catch (e) {
+    msgEl.className = 'msg err';
+    msgEl.textContent = e.message;
+  }
+}
+
+async function regenerateKey(appSource) {
+  if (!confirm(`Regenerate the key for "${appSource}"? The old key stops working immediately.`)) return;
+  try {
+    const result = await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/keys/regenerate`, { method: 'POST' });
+    showKey(result.key);
+    await refresh();
+  } catch (e) {
+    alert('Regenerate failed: ' + e.message);
+  }
+}
+
+async function revokeKey(appSource, keyId) {
+  if (!confirm('Revoke this key? Anything using it loses access immediately.')) return;
+  try {
+    await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/keys/${keyId}/revoke`, { method: 'POST' });
+    await refresh();
+  } catch (e) {
+    alert('Revoke failed: ' + e.message);
+  }
+}
+
+async function upgradeApp(appSource) {
+  const plan = prompt('Upgrade to which plan? (STANDARD or ENTERPRISE)', 'STANDARD');
+  if (!plan) return;
+  try {
+    const body = new URLSearchParams({ plan: plan.toUpperCase() });
+    const result = await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/billing/checkout-link`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    if (result.configured === false) { alert(result.reason || 'Billing not configured yet.'); return; }
+    window.open(result.url, '_blank');
+  } catch (e) {
+    alert('Could not start checkout: ' + e.message);
+  }
+}
+
+async function manageBilling(appSource) {
+  try {
+    const result = await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/billing/portal-link`);
+    if (result.configured === false) { alert(result.reason || 'Billing not configured yet.'); return; }
+    window.open(result.url, '_blank');
+  } catch (e) {
+    alert('Could not open billing portal: ' + e.message);
+  }
+}
+
+async function refresh() {
+  try {
+    const data = await api('/tenants/my-apps');
+    const apps = data.apps || [];
+    document.getElementById('appsList').innerHTML = apps.length ? apps.map(a => `
+      <div class="appCard">
+        <div class="appCardHead">
+          <span class="appName">${esc(a.app_source)}</span>
+          <span class="pill ${esc((a.plan || 'free').toLowerCase())}">${esc(a.plan || 'FREE')}</span>
+          <span class="pill ${esc(a.status || 'active')}">${esc(a.status || 'active')}</span>
+          <div class="appActions">
+            ${a.plan === 'FREE' || !a.plan ? `<button class="btn secondary small" onclick="upgradeApp('${esc(a.app_source)}')">Upgrade</button>` : `<button class="btn secondary small" onclick="manageBilling('${esc(a.app_source)}')">Manage billing</button>`}
+            <button class="btn secondary small" onclick="regenerateKey('${esc(a.app_source)}')">Regenerate key</button>
+          </div>
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${(a.keys || []).map(k => `
+                <tr>
+                  <td>${esc(k.key_prefix)}…</td>
+                  <td>${fmtDate(k.created_at)}</td>
+                  <td>${fmtDate(k.last_used_at)}</td>
+                  <td><span class="pill ${k.revoked_at ? 'revoked' : 'active'}">${k.revoked_at ? 'revoked' : 'active'}</span></td>
+                  <td class="actions">${k.revoked_at ? '' : `<button class="btn danger small" onclick="revokeKey('${esc(a.app_source)}','${esc(k.id)}')">Revoke</button>`}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `).join('') : '<div class="empty">No apps yet — claim one above.</div>';
+  } catch (e) {
+    document.getElementById('appsList').innerHTML = `<div class="empty">Error loading apps: ${esc(e.message)}</div>`;
+  }
+}
+
+async function boot() {
+  document.getElementById('gate').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  try {
+    await api('/tenants/my-apps');
+  } catch (e) {
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('gate').style.display = 'flex';
+    document.getElementById('gateErr').textContent = 'Invalid token or connection failed.';
+    return;
+  }
+  refresh();
+}
+
+if (TOKEN) boot();
+</script>
+</body>
+</html>

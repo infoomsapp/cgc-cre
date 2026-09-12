@@ -578,6 +578,120 @@ async def self_signup_tenant(
     logger.info(f"[tenants] self-signup: app_source={app_source} by {user['email']}")
     return issued
 
+
+def _owns_app_source(app_source: str, email: str) -> bool:
+    """True if this account has ever issued a key for app_source (self-signup
+    or an earlier regenerate) -- the closest thing this schema has to an
+    'owner' column. Deliberately checks ALL keys, not just active ones: an
+    account that revoked its own key still owns the app_source and must be
+    able to regenerate a fresh one, not get locked out permanently."""
+    return any(
+        k.get("created_by") == email
+        for k in app.auth.list_api_keys(app_source)
+    )
+
+
+@app.get("/tenants/my-apps", tags=["Admin"])
+async def list_my_apps(user=Depends(get_current_user)) -> Dict[str, Any]:
+    """Customer self-service: every app_source this account has ever
+    claimed (via self-signup or a prior regenerate), with its own keys and
+    billing status -- scoped to the caller, never another tenant's data.
+    This is the read this account's own 'API Keys' settings page is built
+    on; GET /admin/api-keys (require_admin) remains the platform-wide,
+    cross-tenant view."""
+    email = user["email"]
+    my_keys = [k for k in app.auth.list_api_keys() if k.get("created_by") == email]
+    owned_sources = sorted({k["app_source"] for k in my_keys})
+
+    apps = []
+    for src in owned_sources:
+        billing = app_billing_manager.get_billing(src) or {}
+        apps.append({
+            "app_source": src,
+            "keys": [k for k in my_keys if k["app_source"] == src],
+            "plan": billing.get("plan", "FREE"),
+            "status": billing.get("status", "active"),
+            "stripe_customer_id": billing.get("stripe_customer_id"),
+        })
+    return {"apps": apps}
+
+
+@app.post("/tenants/my-apps/{app_source}/keys/regenerate", tags=["Admin"])
+async def regenerate_my_key(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    """Revokes every currently-active key this account holds for
+    app_source and issues one fresh key -- the self-service equivalent of
+    the admin Tenants dashboard's 'Revoke' + 'Issue API key' pair, done
+    atomically enough that the caller is never left with zero valid keys
+    mid-rotation on the happy path."""
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+
+    if not check_rate_limit(f"tenant_key_regen:{user['email']}", 5, 3600):
+        raise HTTPException(status_code=429, detail="Too many key regenerations — try again later")
+
+    for k in app.auth.list_api_keys(app_source):
+        if k.get("created_by") == user["email"] and k.get("revoked_at") is None:
+            app.auth.revoke_api_key(k["id"])
+
+    return app.auth.generate_api_key(app_source, created_by=user["email"])
+
+
+@app.post("/tenants/my-apps/{app_source}/keys/{key_id}/revoke", tags=["Admin"])
+async def revoke_my_key(app_source: str, key_id: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    owned_keys = [k for k in app.auth.list_api_keys(app_source) if k.get("created_by") == user["email"]]
+    if not any(k["id"] == key_id for k in owned_keys):
+        raise HTTPException(status_code=403, detail="You don't own this key")
+    return app.auth.revoke_api_key(key_id)
+
+
+@app.post("/tenants/my-apps/{app_source}/billing/checkout-link", tags=["Billing"])
+async def create_my_billing_checkout_link(
+    app_source: str, plan: str = Form(...), user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Customer-scoped version of /admin/billing/checkout-link -- same
+    Stripe logic, but ownership-checked instead of admin-only, so a
+    self-signed-up tenant can upgrade off FREE without asking an admin."""
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if plan.upper() not in tenant_manager.PLAN_QUOTAS or plan.upper() == "FREE":
+        raise HTTPException(status_code=400, detail=f"Not a checkout-eligible plan: {plan}")
+
+    billing = StripeBilling()
+    existing = app_billing_manager.get_billing(app_source)
+    existing_customer_id = existing.get("stripe_customer_id") if existing else None
+    try:
+        result = billing.create_checkout_session(
+            app_source=app_source,
+            plan=plan.upper(),
+            success_url=_BILLING_SUCCESS_URL,
+            cancel_url=_BILLING_CANCEL_URL,
+            existing_customer_id=existing_customer_id,
+        )
+    except StripeBillingError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+    if not result.get("configured"):
+        return {"configured": False, "reason": "Stripe not configured (STRIPE_SECRET_KEY unset)"}
+    return result
+
+
+@app.get("/tenants/my-apps/{app_source}/billing/portal-link", tags=["Billing"])
+async def create_my_billing_portal_link(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    existing = app_billing_manager.get_billing(app_source)
+    if not existing or not existing.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="No Stripe customer on file for this app_source")
+
+    billing = StripeBilling()
+    try:
+        result = billing.create_portal_session(existing["stripe_customer_id"], _BILLING_SUCCESS_URL)
+    except StripeBillingError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+    if not result.get("configured"):
+        return {"configured": False, "reason": "Stripe not configured (STRIPE_SECRET_KEY unset)"}
+    return result
+
+
 # =========================
 # STRIPE BILLING (Gap 2 -- CGC Core billing ITS OWN tenants, not any of the
 # first-party apps' own end-user billing, which is entirely separate)
@@ -781,6 +895,7 @@ _DASHBOARD_SCORING_HTML = (Path(__file__).parent / "static" / "dashboard_scoring
 _DASHBOARD_SECURITY_HTML = (Path(__file__).parent / "static" / "dashboard_security.html").read_text(encoding="utf-8")
 _DASHBOARD_TENANTS_HTML = (Path(__file__).parent / "static" / "dashboard_tenants.html").read_text(encoding="utf-8")
 _DASHBOARD_LAUNCH_HTML = (Path(__file__).parent / "static" / "dashboard_launch.html").read_text(encoding="utf-8")
+_DASHBOARD_ACCOUNT_HTML = (Path(__file__).parent / "static" / "dashboard_account.html").read_text(encoding="utf-8")
 
 # 2026-08-24: the one deliberate exception to "no shared-asset routes" above
 # -- the real CGC-core brand mark (cropped/chroma-keyed to a transparent PNG
@@ -844,6 +959,17 @@ async def dashboard_launch() -> HTMLResponse:
     """Play Store / App Store submission readiness -- manual checklist +
     automated repo/Supabase-advisor signals, per app_source."""
     return HTMLResponse(content=_DASHBOARD_LAUNCH_HTML)
+
+@app.get("/dashboard/account", tags=["System"], response_class=HTMLResponse)
+async def dashboard_account() -> HTMLResponse:
+    """Customer self-service settings: claim an app_source, view/regenerate/
+    revoke your OWN API keys, upgrade/manage your OWN billing -- scoped to
+    the signed-in account via /tenants/my-apps and friends (ownership-
+    checked, never require_admin). Deliberately NOT linked from the
+    internal-ops topnav (Home/Governance/Scoring/Security/Tenants/Launch
+    Readiness) -- those are operator-only surfaces; this is the one a
+    customer is meant to actually use, standalone."""
+    return HTMLResponse(content=_DASHBOARD_ACCOUNT_HTML)
 
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:
