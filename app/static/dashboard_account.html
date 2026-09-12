@@ -98,6 +98,14 @@
   .pill.free { background: var(--panel-2); color: var(--muted); }
   .pill.free::before { background: var(--muted); }
   .appActions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .usageRow { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
+  .usageBar { flex: 1; height: 6px; background: var(--panel-2); border-radius: 100px; overflow: hidden; }
+  .usageBar .fill { height: 100%; background: var(--accent); }
+  .usageBar .fill.warn { background: var(--amber); }
+  .usageBar .fill.over { background: var(--red); }
+  .warnBadge { display: inline-block; background: var(--amber-bg); color: var(--amber); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
+  .webhookRow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; flex-wrap: wrap; }
+  .webhookUrl { color: var(--muted); font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
 
   table { width: 100%; border-collapse: collapse; }
   .tablewrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
@@ -147,6 +155,7 @@
       </div>
     </div>
     <div class="right">
+      <a class="logout" href="/docs/getting-started" style="text-decoration:none; display:inline-block;">API docs</a>
       <button class="logout" onclick="disconnect()">Sign out</button>
     </div>
   </header>
@@ -178,6 +187,20 @@
     <div class="keyBox" id="keyModalValue"></div>
     <div class="warn">Copy it now and store it securely.</div>
     <button class="btn" onclick="closeKeyModal()">Done</button>
+  </div>
+</div>
+
+<div class="modalBg" id="webhookModal">
+  <div class="modal">
+    <h3>Webhook</h3>
+    <p>CGC Core will POST a signed JSON payload to this URL every time a decision completes for <span id="webhookAppName" style="font-family:var(--mono)"></span>. Must be https://.</p>
+    <input id="webhookUrlInput" class="field" style="width:100%; margin-bottom:14px" placeholder="https://your-app.example.com/webhooks/cgc-core">
+    <div id="webhookSecretBox" class="keyBox" style="display:none"></div>
+    <div id="webhookMsg" class="msg"></div>
+    <div class="row" style="display:flex; gap:8px;">
+      <button class="btn secondary" style="width:auto" onclick="closeWebhookModal()">Close</button>
+      <button class="btn" style="width:auto" onclick="saveWebhook()">Save</button>
+    </div>
   </div>
 </div>
 
@@ -320,11 +343,35 @@ async function manageBilling(appSource) {
   }
 }
 
+function usageBarHtml(usage) {
+  if (!usage || usage.decisions_quota == null) return '';
+  const unlimited = usage.decisions_quota < 0;
+  const pct = unlimited ? 0 : Math.min(100, Math.round((usage.decisions_used / Math.max(usage.decisions_quota, 1)) * 100));
+  const cls = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : '';
+  const label = unlimited
+    ? `${usage.decisions_used.toLocaleString()} decisions this month (unlimited)`
+    : `${usage.decisions_used.toLocaleString()} / ${usage.decisions_quota.toLocaleString()} decisions this month`;
+  return `
+    <div class="usageRow">
+      <span>${esc(label)}</span>
+      ${unlimited ? '' : `<div class="usageBar"><div class="fill ${cls}" style="width:${pct}%"></div></div>`}
+    </div>`;
+}
+
 async function refresh() {
   try {
     const data = await api('/tenants/my-apps');
     const apps = data.apps || [];
-    document.getElementById('appsList').innerHTML = apps.length ? apps.map(a => `
+
+    const webhooks = {};
+    await Promise.all(apps.map(async a => {
+      try { webhooks[a.app_source] = await api(`/tenants/my-apps/${encodeURIComponent(a.app_source)}/webhook`); }
+      catch (e) { webhooks[a.app_source] = { configured: false }; }
+    }));
+
+    document.getElementById('appsList').innerHTML = apps.length ? apps.map(a => {
+      const wh = webhooks[a.app_source] || { configured: false };
+      return `
       <div class="appCard">
         <div class="appCardHead">
           <span class="appName">${esc(a.app_source)}</span>
@@ -335,13 +382,14 @@ async function refresh() {
             <button class="btn secondary small" onclick="regenerateKey('${esc(a.app_source)}')">Regenerate key</button>
           </div>
         </div>
+        ${usageBarHtml(a.usage)}
         <div class="tablewrap">
           <table>
             <thead><tr><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
               ${(a.keys || []).map(k => `
                 <tr>
-                  <td>${esc(k.key_prefix)}…</td>
+                  <td>${esc(k.key_prefix)}…${k.rotation_recommended ? '<span class="warnBadge">Rotate soon</span>' : ''}</td>
                   <td>${fmtDate(k.created_at)}</td>
                   <td>${fmtDate(k.last_used_at)}</td>
                   <td><span class="pill ${k.revoked_at ? 'revoked' : 'active'}">${k.revoked_at ? 'revoked' : 'active'}</span></td>
@@ -351,10 +399,66 @@ async function refresh() {
             </tbody>
           </table>
         </div>
+        <div class="webhookRow">
+          ${wh.configured
+            ? `<span>Webhook: <span class="webhookUrl">${esc(wh.url)}</span>${wh.last_delivery_status ? ` — last delivery: ${esc(wh.last_delivery_status)}` : ''}</span>`
+            : '<span class="webhookUrl">No webhook configured</span>'}
+          <div class="appActions">
+            <button class="btn secondary small" onclick="openWebhookModal('${esc(a.app_source)}', '${wh.configured ? esc(wh.url) : ''}')">${wh.configured ? 'Edit' : 'Add webhook'}</button>
+            ${wh.configured ? `<button class="btn danger small" onclick="deleteWebhook('${esc(a.app_source)}')">Remove</button>` : ''}
+          </div>
+        </div>
       </div>
-    `).join('') : '<div class="empty">No apps yet — claim one above.</div>';
+    `;
+    }).join('') : '<div class="empty">No apps yet — claim one above.</div>';
   } catch (e) {
     document.getElementById('appsList').innerHTML = `<div class="empty">Error loading apps: ${esc(e.message)}</div>`;
+  }
+}
+
+let webhookAppSource = null;
+
+function openWebhookModal(appSource, currentUrl) {
+  webhookAppSource = appSource;
+  document.getElementById('webhookAppName').textContent = appSource;
+  document.getElementById('webhookUrlInput').value = currentUrl || '';
+  document.getElementById('webhookSecretBox').style.display = 'none';
+  document.getElementById('webhookMsg').textContent = '';
+  document.getElementById('webhookModal').classList.add('show');
+}
+function closeWebhookModal() {
+  document.getElementById('webhookModal').classList.remove('show');
+  webhookAppSource = null;
+}
+async function saveWebhook() {
+  const url = document.getElementById('webhookUrlInput').value.trim();
+  const msgEl = document.getElementById('webhookMsg');
+  msgEl.className = 'msg'; msgEl.textContent = '';
+  if (!url) { msgEl.className = 'msg err'; msgEl.textContent = 'URL is required.'; return; }
+  try {
+    const result = await api(`/tenants/my-apps/${encodeURIComponent(webhookAppSource)}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const box = document.getElementById('webhookSecretBox');
+    box.style.display = 'block';
+    box.textContent = result.secret;
+    msgEl.className = 'msg ok';
+    msgEl.textContent = 'Saved. Copy the signing secret now — verify X-CGC-Signature (HMAC-SHA256) on your endpoint.';
+    await refresh();
+  } catch (e) {
+    msgEl.className = 'msg err';
+    msgEl.textContent = e.message;
+  }
+}
+async function deleteWebhook(appSource) {
+  if (!confirm('Remove this webhook?')) return;
+  try {
+    await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/webhook`, { method: 'DELETE' });
+    await refresh();
+  } catch (e) {
+    alert('Could not remove webhook: ' + e.message);
   }
 }
 

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CGC Core — Getting Started</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/img/cgc_favicon_32.png">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/img/cgc_favicon_64.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/img/cgc_favicon_180.png">
+<style>
+  :root {
+    --bg: #0b0f0e; --panel: #121816; --panel-2: #171f1c; --border: #253430;
+    --text: #e6efe9; --muted: #7d9089; --accent: #4fd8a8;
+    --mono: ui-monospace, "SF Mono", Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 15px; line-height: 1.65;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 40px 20px 80px; }
+  .brandRow { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .brandRow img { width: 28px; height: 28px; }
+  .brandRow .name { font-weight: 700; font-size: 15px; }
+  .brandRow nav { margin-left: auto; display: flex; gap: 16px; }
+  .brandRow nav a { color: var(--muted); text-decoration: none; font-size: 12.5px; font-weight: 700; }
+  .brandRow nav a:hover { color: var(--text); }
+  h1 { font-size: 26px; margin: 0 0 8px; }
+  h2 { font-size: 17px; margin: 40px 0 12px; border-top: 1px solid var(--border); padding-top: 28px; }
+  h2:first-of-type { border-top: none; padding-top: 0; }
+  p { color: var(--text); }
+  .lead { color: var(--muted); font-size: 15px; margin-bottom: 8px; }
+  code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; font-family: var(--mono); font-size: 13px; }
+  pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px;
+    line-height: 1.6; color: var(--text);
+  }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .note { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 12px 16px; font-size: 13.5px; color: var(--muted); margin: 12px 0; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brandRow">
+    <img src="/static/img/cgc_icon.png" alt="">
+    <span class="name">CGC Core</span>
+    <nav>
+      <a href="/dashboard/account">My Account</a>
+      <a href="/docs">API reference (Swagger)</a>
+    </nav>
+  </div>
+
+  <h1>Getting started</h1>
+  <p class="lead">Everything you need to send your first decision through CGC Core and receive a webhook back.</p>
+
+  <h2>1. Get an account</h2>
+  <p>Sign up with an email and password:</p>
+  <pre>curl -X POST https://cgc-cre.vercel.app/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "a-strong-password-12+chars"}'</pre>
+  <p>Then sign in to get a bearer token:</p>
+  <pre>curl -X POST https://cgc-cre.vercel.app/auth/signin \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "a-strong-password-12+chars"}'
+# -> { "access_token": "eyJ..." }</pre>
+
+  <h2>2. Claim your app and get an API key</h2>
+  <p>An <code>app_source</code> is your app's identity in CGC Core — lowercase letters/digits/hyphens, 3–50 characters. Claim one with your bearer token:</p>
+  <pre>curl -X POST https://cgc-cre.vercel.app/tenants/self-signup \
+  -H "Authorization: Bearer eyJ..." \
+  -H "Content-Type: application/json" \
+  -d '{"app_source": "my-app"}'
+# -> { "key": "cgc_live_...", "key_prefix": "cgc_live_XXXXXXXX" }</pre>
+  <div class="note">The <code>key</code> field is shown exactly once. Store it now — it can only be revoked and replaced later, never recovered. Manage it any time at <a href="/dashboard/account">/dashboard/account</a>.</div>
+
+  <h2>3. Send a decision</h2>
+  <p>Use the API key as your bearer token from here on — it's bound to your <code>app_source</code>, so you don't need to pass it again:</p>
+  <pre>curl -X POST https://cgc-cre.vercel.app/governance/decision \
+  -H "Authorization: Bearer cgc_live_..." \
+  -F "org_id=customer-42" \
+  -F "action=classify_transaction" \
+  -F 'input_data={"amount": 500, "category": "office_supplies"}' \
+  -F "user_email=you@example.com" \
+  -F 'data_domains=["financial"]' \
+  -F "area=FINANCE"</pre>
+  <p>The response includes <code>approved</code>, <code>outcome</code> (<code>APPROVE</code> / <code>REJECT</code> / <code>REQUIRE_HUMAN</code>), the full module score breakdown, and a cryptographically signed <code>decision_artifact</code> (Proof of Decision). See <a href="/governance/scoring-methodology">/governance/scoring-methodology</a> for exactly how the outcome is computed.</p>
+
+  <h2>4. Set up a webhook (optional)</h2>
+  <p>Register a URL to receive a signed POST every time a decision resolves for your <code>app_source</code>, instead of polling:</p>
+  <pre>curl -X POST https://cgc-cre.vercel.app/tenants/my-apps/my-app/webhook \
+  -H "Authorization: Bearer eyJ..." \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://your-app.example.com/webhooks/cgc-core"}'
+# -> { "secret": "whsec_..." }  -- shown once, store it</pre>
+  <p>Every delivery includes an <code>X-CGC-Signature: sha256=&lt;hex&gt;</code> header — an HMAC-SHA256 of the raw request body, keyed with your webhook secret. Verify it before trusting the payload:</p>
+  <pre>import hmac, hashlib
+
+def verify(body: bytes, signature_header: str, secret: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header)</pre>
+  <div class="note">Delivery is best-effort with a 5-second timeout and no retry queue yet — a slow or failing endpoint never blocks or delays your <code>/governance/decision</code> call beyond that timeout, but a missed delivery isn't retried. Check <code>last_delivery_status</code> via <code>GET /tenants/my-apps/{app_source}/webhook</code> if you suspect one was missed.</div>
+
+  <h2>Rate limits &amp; quotas</h2>
+  <table>
+    <thead><tr><th>Plan</th><th>Decisions/month</th><th>Burst (per minute)</th></tr></thead>
+    <tbody>
+      <tr><td>FREE</td><td>1,000</td><td>60</td></tr>
+      <tr><td>STANDARD</td><td>50,000</td><td>300</td></tr>
+      <tr><td>ENTERPRISE</td><td>5,000,000</td><td>1,000</td></tr>
+    </tbody>
+  </table>
+  <p>Your current usage against your quota is shown live on <a href="/dashboard/account">/dashboard/account</a>. Upgrade from there — no admin action needed.</p>
+
+  <h2>Key rotation</h2>
+  <p>Rotate your key any time from <a href="/dashboard/account">/dashboard/account</a> — this revokes the old key and issues a new one immediately. Keys older than 90 days show a "Rotate soon" badge as a reminder; nothing rotates automatically or expires on its own.</p>
+
+  <h2>Full API reference</h2>
+  <p>Every endpoint, request/response schema, and error shape is in the interactive <a href="/docs">Swagger UI</a>.</p>
+</div>
+</body>
+</html>

@@ -2151,6 +2151,118 @@ class Database:
             return [r for r in snapshots if r.get('app_source') == app_source]
 
     # ======================================================================
+    # TENANT WEBHOOKS (self-service outbound notifications, per app_source)
+    # ======================================================================
+    # One row per app_source (upsert, not a history table) -- a customer
+    # points CGC Core at their own URL and gets a signed POST every time a
+    # /governance/decision call resolves for their app_source. Flat table,
+    # same convention as cgc_launch_checklist_items -- no destructive DROP,
+    # best-effort provisioning (a failure here must never take down the app).
+
+    def _create_tenant_webhooks_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_tenant_webhooks (
+                        id                  BIGSERIAL PRIMARY KEY,
+                        app_source          VARCHAR(50) NOT NULL UNIQUE,
+                        url                 TEXT NOT NULL,
+                        secret              TEXT NOT NULL,
+                        active              BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_by          VARCHAR(255),
+                        created_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        last_delivery_at    TIMESTAMP WITH TIME ZONE,
+                        last_delivery_status TEXT
+                    )
+                """)
+                logger.info("Tenant webhooks schema ready")
+        except Exception as e:
+            logger.warning(f"_create_tenant_webhooks_schema failed (non-fatal): {e}")
+
+    def save_webhook(self, app_source: str, url: str, secret: str, created_by: str) -> Dict[str, Any]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_tenant_webhooks (app_source, url, secret, created_by, active)
+                        VALUES (%s, %s, %s, %s, TRUE)
+                        ON CONFLICT (app_source) DO UPDATE SET
+                            url = EXCLUDED.url, secret = EXCLUDED.secret,
+                            active = TRUE, updated_at = NOW()
+                        RETURNING *
+                    """, (app_source, url, secret, created_by))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                hooks = self._read_json_list('tenant_webhooks.json')
+                now = datetime.now(timezone.utc).isoformat()
+                for r in hooks:
+                    if r.get('app_source') == app_source:
+                        r.update({'url': url, 'secret': secret, 'active': True, 'updated_at': now})
+                        self._write_json_list('tenant_webhooks.json', hooks)
+                        return r
+                new_row = {
+                    'app_source': app_source, 'url': url, 'secret': secret, 'active': True,
+                    'created_by': created_by, 'created_at': now, 'updated_at': now,
+                    'last_delivery_at': None, 'last_delivery_status': None,
+                }
+                hooks.append(new_row)
+                self._write_json_list('tenant_webhooks.json', hooks)
+                return new_row
+
+    def get_webhook(self, app_source: str) -> Optional[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM cgc_tenant_webhooks WHERE app_source = %s", (app_source,))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            for r in self._read_json_list('tenant_webhooks.json'):
+                if r.get('app_source') == app_source:
+                    return r
+            return None
+
+    def delete_webhook(self, app_source: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM cgc_tenant_webhooks WHERE app_source = %s", (app_source,))
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                hooks = self._read_json_list('tenant_webhooks.json')
+                remaining = [r for r in hooks if r.get('app_source') != app_source]
+                found = len(remaining) != len(hooks)
+                if found:
+                    self._write_json_list('tenant_webhooks.json', remaining)
+                return found
+
+    def record_webhook_delivery(self, app_source: str, status: str) -> None:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE cgc_tenant_webhooks SET last_delivery_at = NOW(), last_delivery_status = %s "
+                        "WHERE app_source = %s",
+                        (status, app_source)
+                    )
+        else:
+            with self.json_lock:
+                hooks = self._read_json_list('tenant_webhooks.json')
+                for r in hooks:
+                    if r.get('app_source') == app_source:
+                        r['last_delivery_at'] = datetime.now(timezone.utc).isoformat()
+                        r['last_delivery_status'] = status
+                        self._write_json_list('tenant_webhooks.json', hooks)
+                        return
+
+    # ======================================================================
     # CALIBRATION CHANGELOG (versioned history for PAN/ECM/PFM/SDA scoring rules)
     # ======================================================================
     # CGC Core's four scoring modules (PAN/ECM/PFM/SDA) read their governance

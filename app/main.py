@@ -10,7 +10,10 @@ import io
 import json
 import re
 import base64
+import hmac
+import hashlib
 import secrets
+import aiohttp
 from datetime import datetime, timezone, timedelta
 from typing import Annotated, Any, Final, Optional, Dict, List
 from time import perf_counter_ns
@@ -478,6 +481,45 @@ async def cleanup_guard_tables(user=Depends(require_admin_or_service)):
     """
     return app.db.cleanup_guard_tables()
 
+
+@app.post("/admin/keys/rotation-check", tags=["Admin"])
+async def check_key_rotation(user=Depends(require_admin_or_service)) -> Dict[str, Any]:
+    """
+    Finds every active API key older than _KEY_ROTATION_WARNING_DAYS and
+    (if SLACK_BOT_TOKEN/SLACK_MONITOR_CHANNEL are configured, same as
+    monitor.py's error alerting) posts one Slack message so an operator
+    can reach out -- there's no per-customer email/notification channel
+    in this codebase yet, so this is the honest, real notification path
+    that actually exists today. No scheduler of its own: wire this up to
+    Vercel Cron/a GitHub Action/cron-job.com, same as
+    /admin/cleanup/guard-tables above. Never rotates anything itself --
+    see _KEY_ROTATION_WARNING_DAYS' own comment for why forced rotation
+    isn't implemented.
+    """
+    stale = [
+        {
+            "id": k["id"], "app_source": k["app_source"], "created_by": k.get("created_by"),
+            "age_days": _key_age_days(k.get("created_at")),
+        }
+        for k in app.auth.list_api_keys()
+        if k.get("revoked_at") is None
+        and (_key_age_days(k.get("created_at")) or 0) >= _KEY_ROTATION_WARNING_DAYS
+    ]
+
+    channel = os.getenv("SLACK_MONITOR_CHANNEL")
+    if stale and channel:
+        try:
+            from app.integrations.slack.slack_teams import SlackIntegration
+            lines = "\n".join(f"- {s['app_source']} (key {s['id'][:8]}…, {s['age_days']}d old, owner {s['created_by']})" for s in stale)
+            text = f":key: *{len(stale)} API key(s) older than {_KEY_ROTATION_WARNING_DAYS} days*\n{lines}"
+            slack = SlackIntegration()
+            await slack.send_message(channel=channel, text=text)
+        except Exception as e:
+            logger.warning(f"[keys] rotation-check Slack alert failed (non-fatal): {e}")
+
+    return {"stale_keys": stale, "threshold_days": _KEY_ROTATION_WARNING_DAYS}
+
+
 # =========================
 # BILLING + TENANT
 # =========================
@@ -579,6 +621,32 @@ async def self_signup_tenant(
     return issued
 
 
+# Advance-notice key rotation (2026-09-12): a warning threshold, not
+# forced/automatic rotation. Silently rotating a customer's live key on a
+# timer with no notification channel to reach them (no email system
+# exists here yet) would risk breaking their production traffic without
+# them ever knowing why -- worse than the stale-key risk it's meant to
+# fix. This surfaces "rotate soon" on /tenants/my-apps and lets the
+# customer choose when, via the self-service Regenerate button that
+# already exists.
+_KEY_ROTATION_WARNING_DAYS = 90
+
+
+def _key_age_days(created_at) -> Optional[int]:
+    """created_at is a real datetime when it comes straight from psycopg2
+    (Postgres TIMESTAMPTZ columns auto-convert), but an ISO string in the
+    JSON-fallback dev mode -- must handle both, not assume one."""
+    if not created_at:
+        return None
+    try:
+        created = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - created).days
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def _owns_app_source(app_source: str, email: str) -> bool:
     """True if this account has ever issued a key for app_source (self-signup
     or an earlier regenerate) -- the closest thing this schema has to an
@@ -606,12 +674,28 @@ async def list_my_apps(user=Depends(get_current_user)) -> Dict[str, Any]:
     apps = []
     for src in owned_sources:
         billing = app_billing_manager.get_billing(src) or {}
+        plan = billing.get("plan", "FREE")
+
+        keys_with_age = []
+        for k in my_keys:
+            if k["app_source"] != src:
+                continue
+            k = dict(k)
+            k["age_days"] = _key_age_days(k.get("created_at"))
+            k["rotation_recommended"] = (
+                k.get("revoked_at") is None
+                and k["age_days"] is not None
+                and k["age_days"] >= _KEY_ROTATION_WARNING_DAYS
+            )
+            keys_with_age.append(k)
+
         apps.append({
             "app_source": src,
-            "keys": [k for k in my_keys if k["app_source"] == src],
-            "plan": billing.get("plan", "FREE"),
+            "keys": keys_with_age,
+            "plan": plan,
             "status": billing.get("status", "active"),
             "stripe_customer_id": billing.get("stripe_customer_id"),
+            "usage": tenant_manager.get_app_source_usage(src, plan),
         })
     return {"apps": apps}
 
@@ -690,6 +774,103 @@ async def create_my_billing_portal_link(app_source: str, user=Depends(get_curren
     if not result.get("configured"):
         return {"configured": False, "reason": "Stripe not configured (STRIPE_SECRET_KEY unset)"}
     return result
+
+
+# =========================
+# TENANT WEBHOOKS (self-service outbound notifications)
+# =========================
+# One webhook URL per app_source. Delivered best-effort, synchronously,
+# with a strict timeout, from inside /governance/decision itself -- see
+# _deliver_webhook's own docstring for why (no background-job runtime
+# exists on Vercel to hand this off to).
+
+class WebhookIn(BaseModel):
+    url: str
+
+
+@app.get("/tenants/my-apps/{app_source}/webhook", tags=["Admin"])
+async def get_my_webhook(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    hook = app.db.get_webhook(app_source)
+    if not hook:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "url": hook["url"],
+        "active": hook["active"],
+        "secret_prefix": hook["secret"][:10] + "…",
+        "last_delivery_at": hook.get("last_delivery_at"),
+        "last_delivery_status": hook.get("last_delivery_status"),
+    }
+
+
+@app.post("/tenants/my-apps/{app_source}/webhook", tags=["Admin"])
+async def set_my_webhook(app_source: str, payload: WebhookIn, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not payload.url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Webhook URL must be https://")
+
+    secret = "whsec_" + secrets.token_urlsafe(32)
+    row = app.db.save_webhook(app_source, payload.url, secret, created_by=user["email"])
+    return {
+        "configured": True,
+        "url": row["url"],
+        "secret": secret,  # only time the full secret is ever returned -- store it now
+    }
+
+
+@app.delete("/tenants/my-apps/{app_source}/webhook", tags=["Admin"])
+async def delete_my_webhook(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    deleted = app.db.delete_webhook(app_source)
+    return {"deleted": deleted}
+
+
+async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any]) -> None:
+    """
+    Best-effort outbound notification, synchronous with a strict timeout.
+    NOT a background job: Vercel's serverless runtime doesn't guarantee
+    anything scheduled after a response is sent actually finishes running
+    (no persistent worker process to hand it to), so a real
+    fire-and-forget task here could silently never execute. Awaiting with
+    a short timeout inside the request is the honest tradeoff -- adds a
+    little latency to /governance/decision, but the delivery genuinely
+    happens (or genuinely times out) rather than maybe-happening. No
+    retry queue exists yet -- a failed delivery is logged and recorded on
+    the webhook row, not retried. Never raises: a broken or slow customer
+    endpoint must never break or delay the governance decision itself
+    beyond the timeout.
+    """
+    hook = app.db.get_webhook(app_source)
+    if not hook or not hook.get("active"):
+        return
+
+    body = json.dumps({"event": event, "app_source": app_source, "data": payload}, default=str, sort_keys=True)
+    signature = hmac.new(hook["secret"].encode(), body.encode(), hashlib.sha256).hexdigest()
+
+    status = "error"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                hook["url"],
+                data=body,
+                headers={"Content-Type": "application/json", "X-CGC-Signature": f"sha256={signature}"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                status = f"http_{resp.status}"
+    except asyncio.TimeoutError:
+        status = "timeout"
+    except Exception as e:
+        status = f"error: {e}"[:200]
+        logger.warning(f"[webhook] delivery to {app_source} failed (non-fatal): {e}")
+
+    try:
+        app.db.record_webhook_delivery(app_source, status)
+    except Exception as e:
+        logger.warning(f"[webhook] recording delivery status failed (non-fatal): {e}")
 
 
 # =========================
@@ -896,6 +1077,7 @@ _DASHBOARD_SECURITY_HTML = (Path(__file__).parent / "static" / "dashboard_securi
 _DASHBOARD_TENANTS_HTML = (Path(__file__).parent / "static" / "dashboard_tenants.html").read_text(encoding="utf-8")
 _DASHBOARD_LAUNCH_HTML = (Path(__file__).parent / "static" / "dashboard_launch.html").read_text(encoding="utf-8")
 _DASHBOARD_ACCOUNT_HTML = (Path(__file__).parent / "static" / "dashboard_account.html").read_text(encoding="utf-8")
+_DOCS_GETTING_STARTED_HTML = (Path(__file__).parent / "static" / "docs_getting_started.html").read_text(encoding="utf-8")
 
 # 2026-08-24: the one deliberate exception to "no shared-asset routes" above
 # -- the real CGC-core brand mark (cropped/chroma-keyed to a transparent PNG
@@ -971,6 +1153,16 @@ async def dashboard_account() -> HTMLResponse:
     customer is meant to actually use, standalone."""
     return HTMLResponse(content=_DASHBOARD_ACCOUNT_HTML)
 
+@app.get("/docs/getting-started", tags=["System"], response_class=HTMLResponse, include_in_schema=False)
+async def docs_getting_started() -> HTMLResponse:
+    """Public, unauthenticated developer guide -- signup/self-signup/first
+    decision/webhooks/rate limits, in plain language with real curl
+    examples. Complements (never duplicates) the auto-generated Swagger UI
+    at /docs: this explains HOW to integrate, Swagger documents WHAT every
+    endpoint accepts. include_in_schema=False since it's a doc page, not
+    an API operation Swagger itself should list."""
+    return HTMLResponse(content=_DOCS_GETTING_STARTED_HTML)
+
 @app.get("/", tags=["System"])
 async def root() -> Dict[str, Any]:
     """Root endpoint with unified system information."""
@@ -1027,6 +1219,17 @@ async def execute_governance_decision(
         app_source = bound_app_source
     elif app_source not in ALLOWED_APP_SOURCES:
         app_source = "unknown"
+
+    # Self-service usage panel counter -- see TenantManager.
+    # record_app_source_decision's own docstring for why this is a
+    # separate, "app_source:"-namespaced counter from the org_id-keyed
+    # quota system below, not a new gate. Best-effort: never blocks or
+    # slows the real decision if the counter write fails.
+    if app_source != "unknown":
+        try:
+            tenant_manager.record_app_source_decision(app_source)
+        except Exception as e:
+            logger.warning(f"[usage] app_source decision counter failed (non-fatal): {e}")
 
     # Dual-keyed distributed rate limit: per org_id AND per IP. Either one
     # tripping blocks the request -- an org-only check alone wouldn't catch
@@ -1162,6 +1365,12 @@ async def execute_governance_decision(
             )
         except Exception as e:
             logger.warning(f"[PoD] seal_intercept failed (non-fatal): {e}")
+
+    if app_source != "unknown":
+        try:
+            await _deliver_webhook(app_source, "decision.completed", response)
+        except Exception as e:
+            logger.warning(f"[webhook] dispatch failed (non-fatal): {e}")
 
     return response
 

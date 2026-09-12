@@ -154,6 +154,38 @@ class TenantManager:
         except Exception as e:
             logger.warning(f"[tenant] usage increment failed for {org_id}/{resource} (non-fatal): {e}")
 
+    # ------------------------------------------------------------------
+    # Self-service usage panel (2026-09-12) -- distinct from the org_id-
+    # keyed quota system above. Every /governance/decision call binds an
+    # app_source (from the caller's per-tenant API key, see main.py's
+    # bound_app_source), but the org_id a caller passes in the same call
+    # is an arbitrary, caller-chosen sub-identifier with no durable
+    # tracking keyed to app_source itself -- there was no real number to
+    # show a self-service customer "how many decisions have you made this
+    # month" without this. Deliberately reuses cgc_guard.tenant_usage (same
+    # table, same RLS policy, zero new schema) under an "app_source:"-
+    # prefixed key so this can never collide with a real org_id a
+    # first-party app already uses, and never touches the actual quota-
+    # enforcement path (check_quota/reserve_quota) above -- this is a
+    # read/display-only counter, not an additional gate.
+    def record_app_source_decision(self, app_source: str) -> None:
+        self._increment_usage(f"app_source:{app_source}", "decisions", 1)
+
+    def get_app_source_usage(self, app_source: str, plan: str = "FREE") -> Dict[str, Any]:
+        """`plan` must come from app_billing_manager.get_billing(app_source)
+        (its own cgc_guard.app_billing row) -- NOT from self._get_plan(),
+        which reads the unrelated org_id-keyed cgc_guard.tenant_plans and
+        would silently default to STANDARD for every self-service tenant
+        that has no row there (i.e. all of them), showing the wrong quota
+        for anyone still on FREE."""
+        used = self._get_usage(f"app_source:{app_source}", "decisions")
+        quota = self.PLAN_QUOTAS.get(plan, self.PLAN_QUOTAS["FREE"])["decisions"]
+        return {
+            "decisions_used": used,
+            "decisions_quota": quota,
+            "period": self._period(),
+        }
+
     def check_quota(
         self,
         org_id: str,
