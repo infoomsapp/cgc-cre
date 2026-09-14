@@ -95,9 +95,11 @@ Response:
 
 Note the request body is form-encoded, not JSON, and `input_data` /
 `data_domains` are JSON-encoded *strings within* the form body — an easy
-first-integration mistake. There is no official SDK in any language yet
-(Section 8.1), so this shape has to be hand-built with your HTTP client
-until one exists. Full interactive schema: `GET /docs` (Swagger). A
+first-integration mistake. A Python SDK (`sdk/python/`, package
+`cgc-core-sdk`) handles this encoding for you — see its own README for
+install/usage; it's the fastest path in for a Python caller. No SDK exists
+yet for other languages, so this shape still has to be hand-built with
+your HTTP client there. Full interactive schema: `GET /docs` (Swagger). A
 hand-written walkthrough also lives at `GET /docs/getting-started`.
 
 ## 6. Webhooks
@@ -150,18 +152,25 @@ on this for anything regulator-sensitive.
 
 ## 8. Known limitations — read before committing to a launch date
 
-1. **No SDK** in any language. Raw HTTP, form-encoded, by hand.
+1. **No SDK outside Python.** A Python SDK exists (`sdk/python/`,
+   `cgc-core-sdk`) — every other language is still raw HTTP, form-encoded,
+   by hand.
 2. **No real API versioning** beyond a single `/api/v1` path — no
    deprecation policy exists yet for breaking changes.
 3. **Audit-trail isolation is app-code-only**, not DB-enforced (Section 7.2).
-4. **No webhook retry queue** — a missed delivery is permanently lost.
+4. **Webhook retries are best-effort, not guaranteed.** A failed delivery
+   is queued and retried on a 5-tier backoff (5m/15m/1h/4h/24h, 5 attempts
+   max — see `POST /admin/webhooks/process-retries`, run every 10 minutes
+   by a GitHub Actions cron), then given up on. There's still no dead-letter
+   surface for permanently-failed deliveries beyond that log line.
 5. **SAML SSO is admin-provisioned only** — not self-service. If your
    enterprise customers expect to configure their own Okta/Azure AD
    connection, that's a manual request to the CGC Core operator today.
-6. **The decision-scoring weight matrix is not API-configurable** — you can
-   read it (`GET /governance/scoring-methodology`) but changing it means
-   asking the operator to edit source and redeploy, not a self-service
-   setting.
+6. **The decision-scoring weight matrix is API-configurable per tenant**
+   (`GET/PUT/DELETE /tenants/my-apps/{app_source}/weighting/{area}/{level}`)
+   as of 2026-09-14 — you're no longer stuck asking the operator to edit
+   source and redeploy for a weight change. Falls back to the global
+   default matrix (still source-only) when no override is set.
 7. **No independent security or cryptography audit has been performed.**
    The crypto choices read as sound on direct code review (RSA-PSS-SHA256,
    Fernet/AES, bcrypt, no homegrown primitives) but "looks correct on
@@ -179,10 +188,10 @@ Ask these before committing:
 
 - [ ] Can my product tolerate "app-code-enforced" isolation for decision
       history (7.2), or do I need DB-level guarantees on every table?
-- [ ] Can I build my own retry/reconciliation logic around webhooks, given
-      there's no built-in retry?
-- [ ] Is a hand-built HTTP integration (no SDK) acceptable for my team's
-      timeline?
+- [ ] Is best-effort webhook retry (5 attempts over 24h, then dropped) good
+      enough, or do I need my own reconciliation/polling fallback too?
+- [ ] Is a hand-built HTTP integration acceptable if my stack isn't Python
+      (no SDK exists yet outside `sdk/python/`)?
 - [ ] Do I need a documented, contractual rate-limit SLA before launch, or
       is "ask the operator" acceptable?
 - [ ] Does my own compliance/procurement process require a third-party

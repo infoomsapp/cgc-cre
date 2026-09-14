@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cgc-core-sdk"
+version = "0.1.0"
+description = "Python client for CGC Core, Olympus Mont's AI governance engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.urls]
+Homepage = "https://github.com/infoomsapp/cgc-cre"
+Integration-Guide = "https://github.com/infoomsapp/cgc-cre/blob/main/docs/INTEGRATION_GUIDE.md"
+
+[tool.setuptools.packages.find]
+include = ["cgc_core_sdk*"]

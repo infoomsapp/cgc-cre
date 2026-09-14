@@ -12,3 +12,6 @@ venv/
 .mypy_cache/
 .git/
 node_modules/
+*.egg-info/
+build/
+dist/
