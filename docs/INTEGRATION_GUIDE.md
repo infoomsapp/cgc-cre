@@ -155,8 +155,14 @@ on this for anything regulator-sensitive.
 1. **No SDK outside Python.** A Python SDK exists (`sdk/python/`,
    `cgc-core-sdk`) — every other language is still raw HTTP, form-encoded,
    by hand.
-2. **No real API versioning** beyond a single `/api/v1` path — no
-   deprecation policy exists yet for breaking changes.
+2. **Still one unversioned surface in practice** — `root_path="/api/v1"`
+   is cosmetic (OpenAPI doc URLs only; `GET /health` is the real path, not
+   `GET /api/v1/health`), and no `/v2` has ever been needed. What's new as
+   of 2026-09-14: a written policy for what happens when one is —
+   [`API_VERSIONING_POLICY.md`](API_VERSIONING_POLICY.md) — path-based
+   versioning, a 90-day minimum deprecation window, `Deprecation` headers,
+   classified breaking-vs-non-breaking changes. Read it before assuming
+   any specific stability guarantee that isn't written down there.
 3. **Audit-trail isolation is app-code-only**, not DB-enforced (Section 7.2).
 4. **Webhook retries are best-effort, not guaranteed.** A failed delivery
    is queued and retried on a 5-tier backoff (5m/15m/1h/4h/24h, 5 attempts
