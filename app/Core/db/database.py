@@ -1527,11 +1527,23 @@ class Database:
 
                 # (table, tenant column, using-clause) -- pod_ledger's is the
                 # odd one out per the uuid5 note in the docstring above.
+                #
+                # 2026-09-14: every current_setting() call below is wrapped
+                # in (select ...) -- Supabase's advisor (auth_rls_initplan)
+                # flagged all 8 of these policies re-evaluating
+                # current_setting() once PER ROW instead of once per query.
+                # Wrapping it as a scalar subquery lets Postgres's planner
+                # treat it as an InitPlan (evaluated once, cached, reused for
+                # every row) instead of re-invoking it per row -- same
+                # semantics, real difference at scale. Doesn't apply to
+                # pod_ledger's uuid_generate_v5(...) call itself (that one
+                # genuinely needs the per-row tenant_id value as an argument,
+                # only the inner current_setting() is worth caching).
                 policies = [
                     ("cgc_pod.inference_intercepts", "tenant_scope",
-                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                     "tenant_id = (select current_setting('cgc.current_tenant_id', true))"),
                     ("cgc_pod.chain_integrity_log", "tenant_scope",
-                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                     "tenant_id = (select current_setting('cgc.current_tenant_id', true))"),
                     # extensions.uuid_generate_v5 -- schema-qualified deliberately.
                     # Supabase installs uuid-ossp into `extensions`, not `public`;
                     # cgc_app's search_path doesn't include it, so an unqualified
@@ -1539,7 +1551,7 @@ class Database:
                     # during pre-cutover verification (2026-08-23), not guessed.
                     ("cgc_pod.pod_ledger", "tenant_scope",
                      "tenant_id = extensions.uuid_generate_v5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid, "
-                     "current_setting('cgc.current_tenant_id', true))"),
+                     "(select current_setting('cgc.current_tenant_id', true)))"),
                     # 2026-09-14: was tenant_id-based, identical to the
                     # other tables above -- but a live check that same day
                     # found audit_trail's tenant_id column holds ad-hoc,
@@ -1558,15 +1570,15 @@ class Database:
                     # and every row has one -- the real, reliable scoping
                     # key here, not tenant_id.
                     ("cgc_tco.audit_trail", "tenant_scope",
-                     "app_source = current_setting('cgc.current_app_source', true)"),
+                     "app_source = (select current_setting('cgc.current_app_source', true))"),
                     ("cgc_guard.internal_flags", "tenant_scope",
-                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                     "tenant_id = (select current_setting('cgc.current_tenant_id', true))"),
                     ("cgc_guard.suspicious_payloads", "tenant_scope",
-                     "org_id = current_setting('cgc.current_tenant_id', true)"),
+                     "org_id = (select current_setting('cgc.current_tenant_id', true))"),
                     ("cgc_guard.tenant_plans", "tenant_scope",
-                     "org_id = current_setting('cgc.current_tenant_id', true)"),
+                     "org_id = (select current_setting('cgc.current_tenant_id', true))"),
                     ("cgc_guard.tenant_usage", "tenant_scope",
-                     "org_id = current_setting('cgc.current_tenant_id', true)"),
+                     "org_id = (select current_setting('cgc.current_tenant_id', true))"),
                 ]
                 for table, policy_name, using_clause in policies:
                     cur.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
