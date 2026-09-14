@@ -95,11 +95,12 @@ Response:
 
 Note the request body is form-encoded, not JSON, and `input_data` /
 `data_domains` are JSON-encoded *strings within* the form body — an easy
-first-integration mistake. A Python SDK (`sdk/python/`, package
-`cgc-core-sdk`) handles this encoding for you — see its own README for
-install/usage; it's the fastest path in for a Python caller. No SDK exists
-yet for other languages, so this shape still has to be hand-built with
-your HTTP client there. Full interactive schema: `GET /docs` (Swagger). A
+first-integration mistake. Two SDKs handle this encoding for you: Python
+(`sdk/python/`, package `cgc-core-sdk`) and TypeScript/JavaScript
+(`sdk/js/`, same package name, mirrors the Python one's method list 1:1)
+— see either one's own README for install/usage. No SDK exists yet for
+any other language, so this shape still has to be hand-built with your
+HTTP client there. Full interactive schema: `GET /docs` (Swagger). A
 hand-written walkthrough also lives at `GET /docs/getting-started`.
 
 ## 6. Webhooks
@@ -115,30 +116,42 @@ a missed webhook would be a real problem for you.
 ## 7. What you're actually trusting — the honest multi-tenancy picture
 
 This is the part most integration docs gloss over. CGC Core enforces tenant
-isolation at **two different strengths depending on the table**, and it
-matters for what you should assume is safe:
+isolation at the database level everywhere that matters, but not all via
+the same key:
 
-**7.1 — Database-enforced (strong)**: `cgc_pod.*` and most of `cgc_guard.*`
-use real Postgres row-level security, scoped via a `cgc_app` role and
-`current_setting('cgc.current_tenant_id')` set per-connection. This is
-verified by tests that connect *as* the RLS-restricted role specifically
-(not the bypass-RLS admin role) — genuine defense in depth, not just
-"the application code remembers to filter."
+**7.1 — Database-enforced via `tenant_id`**: `cgc_pod.*` and most of
+`cgc_guard.*` use real Postgres row-level security, scoped via a `cgc_app`
+role and `current_setting('cgc.current_tenant_id')` set per-connection.
+Verified by tests that connect *as* the RLS-restricted role specifically
+(not the bypass-RLS admin role) — genuine defense in depth, not just "the
+application code remembers to filter."
 
-**7.2 — Application-code-enforced only (weaker), confirmed 2026-09-14**:
+**7.2 — Database-enforced via `app_source`, closed 2026-09-14**:
 `cgc_tco.audit_trail` — **the actual decision history you'd query as an
-integrating company** — is scoped only by a `WHERE app_source = %s` filter
-in Python, executed over an unrestricted admin database connection. There's
-no database-level backstop if that filter is ever omitted in a future code
-change. A live-DB check confirmed this is the right call, not just the
-current state: a leftover `tenant_id`-based RLS policy on this table was
-found and dropped after verifying `tenant_id` doesn't actually correspond
-to a real per-tenant identifier for at least one app (`ledgiproof`'s rows
-carry ad-hoc testing strings in that column, not a consistent tenant ID) —
-so DB-level RLS here wouldn't have isolated data correctly even if it had
-been active. This is the one place where "is my data isolated from other
-tenants" has a real, not theoretical, answer of "yes, today, because the
-code is careful — not because the database won't let it happen otherwise."
+integrating company** — used to be scoped only by a `WHERE app_source = %s`
+filter in Python over an unrestricted admin connection, with no
+database-level backstop. A live-DB check that same day found the reason:
+this table's `tenant_id` column doesn't correspond to a real per-tenant
+identifier for at least one app (`ledgiproof`'s rows carry ad-hoc testing
+strings in that column, not a consistent tenant ID), so a `tenant_id`-based
+RLS policy here — copy-pasted from the pattern in 7.1 — was wrong and had
+already been dropped from the live database. The fix wasn't "give up on
+DB-level isolation for this table," it was using the column that actually
+is reliable: `app_source` is indexed, populated on every row, and the same
+value application code was already filtering by. `get_scoped_connection()`
+now accepts an `app_source` parameter (a second, distinct session variable
+from `tenant_id`'s, `cgc.current_app_source` — deliberately not reused,
+so this fix can't quietly regress back into the same bad-data problem),
+and `GET /governance/reports/{app_source}`, `GET /governance/timeseries/
+{app_source}`, and `GET /tenants/my-apps/{app_source}/decisions` all read
+through it. Verified with two rows sharing an identical (messy) `tenant_id`
+but different `app_source` values, connected as the RLS-restricted role
+with no bypass: each scope saw only its own row, and a connection with no
+scope set at all saw zero — real isolation, not just "the code is careful."
+Writes to this table still go through the unrestricted admin connection
+permanently, by design (see `get_scoped_connection()`'s own docstring) —
+this table is one global sequential hash chain, and scoping the
+block-numbering write would corrupt it, not isolate it.
 
 **7.3 — Credential-level binding**: your API key is cryptographically tied
 to your `app_source` at issuance (fixed after a real historical bug where a
@@ -146,15 +159,16 @@ client-declared `app_source` field was trusted at face value on
 unauthenticated signup — see the CGC Core security audit for the full
 history). You cannot use a valid key to act as a different tenant.
 
-If your company's compliance posture requires DB-enforced isolation on
-*every* table touching your data, ask specifically about 7.2 before relying
-on this for anything regulator-sensitive.
+`GET /governance/reports/{app_source}` and `GET /governance/timeseries/
+{app_source}` (also closed 2026-09-14) now work for either a first-party
+app_source or one you own via `claim_app_source()` — previously they
+400'd for every self-signup tenant, regardless of ownership.
 
 ## 8. Known limitations — read before committing to a launch date
 
-1. **No SDK outside Python.** A Python SDK exists (`sdk/python/`,
-   `cgc-core-sdk`) — every other language is still raw HTTP, form-encoded,
-   by hand.
+1. **SDKs exist for Python and TypeScript/JavaScript** (`sdk/python/`,
+   `sdk/js/`, both as `cgc-core-sdk`) as of 2026-09-14 — every other
+   language is still raw HTTP, form-encoded, by hand.
 2. **Still one unversioned surface in practice** — `root_path="/api/v1"`
    is cosmetic (OpenAPI doc URLs only; `GET /health` is the real path, not
    `GET /api/v1/health`), and no `/v2` has ever been needed. What's new as
@@ -163,7 +177,8 @@ on this for anything regulator-sensitive.
    versioning, a 90-day minimum deprecation window, `Deprecation` headers,
    classified breaking-vs-non-breaking changes. Read it before assuming
    any specific stability guarantee that isn't written down there.
-3. **Audit-trail isolation is app-code-only**, not DB-enforced (Section 7.2).
+3. **Audit-trail isolation is DB-enforced as of 2026-09-14** (Section 7.2)
+   — was app-code-only.
 4. **Webhook retries are best-effort, not guaranteed.** A failed delivery
    is queued and retried on a 5-tier backoff (5m/15m/1h/4h/24h, 5 attempts
    max — see `POST /admin/webhooks/process-retries`, run every 10 minutes
@@ -192,12 +207,10 @@ on this for anything regulator-sensitive.
 
 Ask these before committing:
 
-- [ ] Can my product tolerate "app-code-enforced" isolation for decision
-      history (7.2), or do I need DB-level guarantees on every table?
 - [ ] Is best-effort webhook retry (5 attempts over 24h, then dropped) good
       enough, or do I need my own reconciliation/polling fallback too?
 - [ ] Is a hand-built HTTP integration acceptable if my stack isn't Python
-      (no SDK exists yet outside `sdk/python/`)?
+      or TypeScript/JavaScript (no SDK exists yet for any other language)?
 - [ ] Do I need a documented, contractual rate-limit SLA before launch, or
       is "ask the operator" acceptable?
 - [ ] Does my own compliance/procurement process require a third-party

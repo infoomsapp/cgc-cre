@@ -768,6 +768,21 @@ def _owns_app_source(app_source: str, email: str) -> bool:
     )
 
 
+def _can_access_app_source(app_source: str, user: Dict[str, Any]) -> bool:
+    """2026-09-14 audit follow-up: /governance/reports/{app_source} and
+    /governance/timeseries/{app_source} used to check ONLY
+    ALLOWED_APP_SOURCES (the static first-party allowlist), the same gap
+    GET /tenants/my-apps/{app_source}/decisions was already built to route
+    around (see that endpoint's own docstring) -- a self-signup tenant's
+    app_source is never in that allowlist, so those two endpoints 400'd
+    for every tenant who onboarded through /tenants/self-signup, even
+    though they own the data being requested. True for either: a
+    first-party app_source (operator/admin access, unchanged), or an
+    app_source this account actually owns (self-service tenant access,
+    new)."""
+    return app_source in ALLOWED_APP_SOURCES or _owns_app_source(app_source, user.get("email", ""))
+
+
 @app.get("/tenants/my-apps", tags=["Admin"])
 async def list_my_apps(user=Depends(get_current_user)) -> Dict[str, Any]:
     """Customer self-service: every app_source this account has ever
@@ -1630,8 +1645,8 @@ async def get_governance_report(
     chain) as an inline-viewable PDF, sourced from TCO's Postgres-backed
     audit trail (cgc_tco.audit_trail).
     """
-    if app_source not in ALLOWED_APP_SOURCES:
-        raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
+    if not _can_access_app_source(app_source, user):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
 
     if not to_date:
         to_date = datetime.now(timezone.utc).date().isoformat()
@@ -1659,8 +1674,8 @@ async def get_governance_timeseries(
     (2026-08-22). Read-only, same TCO instance every other governance route
     uses (app.tco).
     """
-    if app_source not in ALLOWED_APP_SOURCES:
-        raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
+    if not _can_access_app_source(app_source, user):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
     return app.tco.get_decision_timeseries(app_source, hours=hours)
 
 

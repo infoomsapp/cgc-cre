@@ -19,14 +19,6 @@ Not covered here: platform-admin-only endpoints (/admin/users,
 billing checkout/portal links) -- those aren't things an integrating
 tenant calls themselves, and pulling them in would blur this SDK's actual
 audience. Add them later if a real caller needs them.
-
-Known API limitation this SDK does not work around: GET /governance/
-reports/{app_source} and GET /governance/timeseries/{app_source} check a
-static ALLOWED_APP_SOURCES allowlist, not tenant ownership -- a
-self-signup app_source (one obtained via claim_app_source()) will get a
-400 from those two calls until that allowlist gap is closed
-server-side. Every other method in this client works for self-signup
-tenants today.
 """
 
 from __future__ import annotations
@@ -190,15 +182,13 @@ class CGCCoreClient:
     ) -> bytes:
         """Returns the raw PDF bytes for a per-app governance report.
         from_date/to_date are ISO date strings (YYYY-MM-DD); defaults to
-        the trailing 30 days. See the module docstring's note on
-        ALLOWED_APP_SOURCES -- this call only works for that static list
-        today, not arbitrary self-signup app_sources."""
+        the trailing 30 days. Works for any app_source you own (claimed via
+        claim_app_source()) or a first-party one."""
         params = {k: v for k, v in {"from_date": from_date, "to_date": to_date}.items() if v}
         resp = self._request("GET", f"/governance/reports/{app_source}", params=params, raw_response=True)
         return resp.content
 
     def get_timeseries(self, app_source: str, hours: int = 24) -> Dict[str, Any]:
-        """Same ALLOWED_APP_SOURCES caveat as get_report_pdf()."""
         return self._request("GET", f"/governance/timeseries/{app_source}", params={"hours": hours})
 
     def get_scoring_methodology(self) -> Dict[str, Any]:

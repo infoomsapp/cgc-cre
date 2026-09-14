@@ -184,7 +184,7 @@ class Database:
             return self._app_pool
 
     @contextmanager
-    def get_scoped_connection(self, tenant_id: Optional[str] = None):
+    def get_scoped_connection(self, tenant_id: Optional[str] = None, app_source: Optional[str] = None):
         """
         Like get_connection(), but for tenant-scoped tables that have a real
         RLS policy checking cgc.current_tenant_id (cgc_guard.internal_flags/
@@ -192,34 +192,45 @@ class Database:
         _create_rls_policies()). Sets the session variable via set_config
         (parameterized, not string-interpolated) before yielding.
 
-        NOT for cgc_tco.audit_trail -- that table is one global sequential
-        chain, not per-tenant (unlike cgc_pod.pod_ledger), so its own
-        block-numbering query needs to see every tenant's rows to compute
-        the next block_number correctly. Scoping that connection by tenant
-        would silently corrupt the chain. audit_trail's writes stay on
-        get_connection() (the unrestricted admin pool) permanently, by
-        design -- not a gap to close later.
+        WRITES to cgc_tco.audit_trail must never go through this (still
+        get_connection(), the unrestricted admin pool, permanently, by
+        design) -- that table is one global sequential chain, not
+        per-tenant like cgc_pod.pod_ledger, so its block-numbering query
+        needs to see every tenant's rows to compute the next block_number
+        correctly; scoping that connection would silently corrupt the
+        chain. READS are a different story: pass app_source (2026-09-14)
+        to scope a read-only connection to cgc_tco.audit_trail's own
+        app_source-keyed RLS policy -- see get_audit_trail_by_app() and
+        get_decision_timeseries() in tcomodule.py, the two call sites this
+        was added for. Deliberately a SEPARATE session variable
+        (cgc.current_app_source) from tenant_id's, not a reuse of it --
+        audit_trail's tenant_id column was found to hold ad-hoc, unreliable
+        data for at least one app (see the RLS policy comment below), so
+        conflating the two would silently reintroduce that same gap.
 
         Falls back to get_connection() (the admin pool) if the app pool
-        can't be created, or if no tenant_id was given -- a tenant-scoped
-        connection with nothing to scope to would fail every write's RLS
-        WITH CHECK (current_setting() returns NULL, and tenant_id = NULL
-        is never true), so callers that sometimes legitimately have no
-        tenant_id (e.g. record_internal_flag's cross-tenant-reach findings)
-        correctly fall back to the unrestricted connection instead of
-        having those specific calls silently start failing.
+        can't be created, or if NEITHER tenant_id nor app_source was given
+        -- a scoped connection with nothing to scope to would fail every
+        write's RLS WITH CHECK (current_setting() returns NULL, and
+        tenant_id = NULL is never true), so callers that sometimes
+        legitimately have no tenant_id (e.g. record_internal_flag's
+        cross-tenant-reach findings) correctly fall back to the
+        unrestricted connection instead of having those specific calls
+        silently start failing.
         """
         app_pool = self._get_app_pool()
-        if app_pool is None or not tenant_id:
+        if app_pool is None or not (tenant_id or app_source):
             with self.get_connection() as conn:
                 yield conn
             return
 
         conn = app_pool.getconn()
         try:
+            cur = conn.cursor()
             if tenant_id:
-                cur = conn.cursor()
                 cur.execute("SELECT set_config('cgc.current_tenant_id', %s, true)", (tenant_id,))
+            if app_source:
+                cur.execute("SELECT set_config('cgc.current_app_source', %s, true)", (app_source,))
             yield conn
             conn.commit()
         except Exception:
@@ -1528,8 +1539,25 @@ class Database:
                     ("cgc_pod.pod_ledger", "tenant_scope",
                      "tenant_id = extensions.uuid_generate_v5('6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid, "
                      "current_setting('cgc.current_tenant_id', true))"),
+                    # 2026-09-14: was tenant_id-based, identical to the
+                    # other tables above -- but a live check that same day
+                    # found audit_trail's tenant_id column holds ad-hoc,
+                    # inconsistent data for at least one app (ledgiproof's
+                    # rows carry testing strings there, not a real tenant
+                    # ID), so that policy was manually dropped from the
+                    # live database as actively wrong, while this list
+                    # (the thing run_schema_migrations.py re-applies on
+                    # every "safe to re-run" invocation) still generated
+                    # it -- meaning the next migration run would have
+                    # silently resurrected the exact policy already found
+                    # broken. app_source is the column this table's reads
+                    # were ALWAYS actually filtered by in application code
+                    # (get_audit_trail_by_app, get_decision_timeseries --
+                    # see tcomodule.py), it's indexed (idx_tco_app_source),
+                    # and every row has one -- the real, reliable scoping
+                    # key here, not tenant_id.
                     ("cgc_tco.audit_trail", "tenant_scope",
-                     "tenant_id = current_setting('cgc.current_tenant_id', true)"),
+                     "app_source = current_setting('cgc.current_app_source', true)"),
                     ("cgc_guard.internal_flags", "tenant_scope",
                      "tenant_id = current_setting('cgc.current_tenant_id', true)"),
                     ("cgc_guard.suspicious_payloads", "tenant_scope",

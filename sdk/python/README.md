@@ -73,13 +73,6 @@ Not covered: platform-admin-only endpoints (`/admin/users`, `/admin/cleanup/*`,
 key-rotation checks, SAML connection management, billing checkout/portal
 links) -- those aren't things an integrating tenant calls itself.
 
-**Known API limitation**: `get_report_pdf` and `get_timeseries` check a
-static allowlist server-side, not tenant ownership -- they work for the
-first-party apps CGC Core already governs, but a freshly self-signed-up
-`app_source` (via `claim_app_source`) will get a 400 from those two calls
-until that's fixed server-side. Every other method works for self-signup
-tenants today.
-
 ## Auth model
 
 Every authenticated endpoint takes the same `Authorization: Bearer <token>`

@@ -673,9 +673,18 @@ class TCO:
         ISO8601 text (datetime.utcnow().isoformat()-based, always the same
         format), so a plain string BETWEEN gives correct chronological
         ordering without needing a TIMESTAMPTZ column.
+
+        2026-09-14: reads now go through get_scoped_connection(app_source=...)
+        -- real Postgres RLS backstop (cgc_tco.audit_trail's own policy,
+        see _create_rls_policies()) behind the WHERE app_source = %s below,
+        not just the Python filter alone. Falls back to the unrestricted
+        admin connection exactly like every other get_scoped_connection()
+        caller if the cgc_app pool isn't configured in this environment --
+        the WHERE clause still filters correctly either way, this is
+        defense in depth, not a behavior change on environments without it.
         """
         try:
-            with self._db.get_connection() as conn:
+            with self._db.get_scoped_connection(app_source=app_source) as conn:
                 if conn is None:
                     return {"status": "error", "message": "no database connection"}
                 cursor = conn.cursor()
@@ -715,9 +724,12 @@ class TCO:
         itself against a real hour axis rather than assuming a continuous
         series -- a quiet hour is real signal on a governance dashboard, not
         something to interpolate away.
+
+        2026-09-14: same get_scoped_connection(app_source=...) RLS
+        backstop as get_audit_trail_by_app() -- see its docstring.
         """
         try:
-            with self._db.get_connection() as conn:
+            with self._db.get_scoped_connection(app_source=app_source) as conn:
                 if conn is None:
                     return {"status": "error", "message": "no database connection", "buckets": []}
                 cursor = conn.cursor()
