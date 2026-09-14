@@ -127,8 +127,15 @@ async def saml_lookup(email: str) -> Dict[str, Any]:
 
 @router.get("/{domain}/login")
 async def saml_login(domain: str, request: Request) -> RedirectResponse:
+    # 2026-09-14: any_status, not the active-only lookup -- a draft
+    # (self-service, not yet activated) connection must still be
+    # reachable through this same route so its owner can test-login
+    # against their real IdP before activating (see saml_acs's draft-mode
+    # branch below). /auth/saml/lookup, used to decide whether to SHOW
+    # ordinary end users an "SSO" button, is unaffected -- it still only
+    # reports active connections as available.
     db = get_database()
-    connection = db.get_saml_connection(domain)
+    connection = db.get_saml_connection_any_status(domain)
     if not connection:
         raise HTTPException(status_code=404, detail=f"No SSO connection configured for domain '{domain}'")
 
@@ -140,7 +147,7 @@ async def saml_login(domain: str, request: Request) -> RedirectResponse:
 @router.post("/{domain}/acs")
 async def saml_acs(domain: str, request: Request) -> RedirectResponse:
     db = get_database()
-    connection = db.get_saml_connection(domain)
+    connection = db.get_saml_connection_any_status(domain)
     if not connection:
         raise HTTPException(status_code=404, detail=f"No SSO connection configured for domain '{domain}'")
 
@@ -170,6 +177,24 @@ async def saml_acs(domain: str, request: Request) -> RedirectResponse:
     if _domain_from_email(email) != domain:
         logger.warning(f"[saml_sso] assertion email domain mismatch: expected {domain}, got {email}")
         raise HTTPException(status_code=403, detail="Assertion email does not match the requested domain")
+
+    # 2026-09-14 -- self-service draft-mode test login. A connection that
+    # isn't active() yet can't issue a real session (activating it is a
+    # separate, explicit step -- see POST /tenants/saml-connections/
+    # {domain}/activate in main.py) -- but a successful, cryptographically
+    # verified round-trip THIS far already proves the IdP metadata this
+    # customer pasted in actually works, which is exactly what
+    # activate_saml_connection() requires before it'll flip active=TRUE.
+    # No session is issued here on purpose: this endpoint has no auth
+    # dependency (it's the real ACS URL, hit by the IdP's redirect, not by
+    # a logged-in browser tab), so it can't know WHICH of this domain's
+    # accounts is the one that should see "test succeeded" -- it only
+    # marks the connection itself as verified and sends the browser back
+    # to a page that account can then check via GET /tenants/saml-connections.
+    if not connection.get("active"):
+        db.mark_saml_connection_test_verified(domain)
+        logger.info(f"[saml_sso] draft connection test-verified: domain={domain}")
+        return RedirectResponse(url="/dashboard/account?saml_test=success", status_code=302)
 
     client_ip = request.client.host if request.client else None
     result = request.app.auth.login_federated(email, ip=client_ip)

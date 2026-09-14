@@ -2913,6 +2913,20 @@ class Database:
                         updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     )
                 """)
+                # 2026-09-14: self-service SAML. `active` already meant
+                # exactly "draft vs live" for free -- get_saml_connection()
+                # (used by /auth/saml/lookup and the real login flow) was
+                # already WHERE active = TRUE, so a self-service connection
+                # inserted with active=FALSE is invisible to real end users
+                # by construction, no new gating logic needed there.
+                # test_verified_at is the one new piece: NULL until a real
+                # SAML round-trip against the customer's own IdP has
+                # succeeded at least once (see saml_acs's draft-mode branch
+                # in api/v1/endpoints/saml_sso.py) -- activate_saml_connection()
+                # refuses to flip active=TRUE without it, closing the
+                # "malformed cert silently locks out the whole company"
+                # risk that was the whole reason this was admin-only before.
+                cur.execute("ALTER TABLE cgc_saml_connections ADD COLUMN IF NOT EXISTS test_verified_at TIMESTAMP WITH TIME ZONE")
                 logger.info("SAML connections schema ready")
         except Exception as e:
             logger.warning(f"_create_saml_connections_schema failed (non-fatal): {e}")
@@ -2969,6 +2983,121 @@ class Database:
                 if r.get('domain') == domain and r.get('active'):
                     return r
             return None
+
+    def get_saml_connection_any_status(self, domain: str) -> Optional[Dict[str, Any]]:
+        """Same as get_saml_connection() but WITHOUT the active=TRUE filter
+        -- for self-service ownership reads (a draft connection its own
+        creator needs to see) and the SAML login/ACS flow's draft-mode
+        test-login branch (see saml_acs in api/v1/endpoints/saml_sso.py).
+        Never used by /auth/saml/lookup -- that one must keep reporting a
+        draft connection as unavailable to ordinary end users."""
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM cgc_saml_connections WHERE domain = %s", (domain,))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            for r in self._read_json_list('saml_connections.json'):
+                if r.get('domain') == domain:
+                    return r
+            return None
+
+    def create_saml_connection_draft(
+        self, domain: str, idp_entity_id: str, idp_sso_url: str, idp_x509_cert: str, created_by: str
+    ) -> Optional[Dict[str, Any]]:
+        """Self-service creation -- INSERT ONLY, never upserts (unlike
+        save_saml_connection, the admin path, which is a real UPSERT
+        because an operator fixing a customer's typo'd cert is a legitimate
+        action). A self-service caller silently overwriting an existing
+        connection for a domain they merely share an email suffix with
+        would be a real cross-account hazard -- domain is globally UNIQUE,
+        so ON CONFLICT DO NOTHING here means "domain already claimed,
+        create nothing" and the caller (main.py) turns that into a 409.
+        Always starts inactive (draft) -- see this table's own schema
+        comment for why activation is a separate, gated step."""
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_saml_connections
+                            (domain, idp_entity_id, idp_sso_url, idp_x509_cert, created_by, active)
+                        VALUES (%s, %s, %s, %s, %s, FALSE)
+                        ON CONFLICT (domain) DO NOTHING
+                        RETURNING *
+                    """, (domain, idp_entity_id, idp_sso_url, idp_x509_cert, created_by))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            with self.json_lock:
+                conns = self._read_json_list('saml_connections.json')
+                if any(r.get('domain') == domain for r in conns):
+                    return None
+                now = datetime.now(timezone.utc).isoformat()
+                new_row = {
+                    'domain': domain, 'idp_entity_id': idp_entity_id, 'idp_sso_url': idp_sso_url,
+                    'idp_x509_cert': idp_x509_cert, 'active': False, 'test_verified_at': None,
+                    'created_by': created_by, 'created_at': now, 'updated_at': now,
+                }
+                conns.append(new_row)
+                self._write_json_list('saml_connections.json', conns)
+                return new_row
+
+    def mark_saml_connection_test_verified(self, domain: str) -> None:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE cgc_saml_connections SET test_verified_at = NOW() WHERE domain = %s", (domain,)
+                    )
+        else:
+            with self.json_lock:
+                conns = self._read_json_list('saml_connections.json')
+                for r in conns:
+                    if r.get('domain') == domain:
+                        r['test_verified_at'] = datetime.now(timezone.utc).isoformat()
+                self._write_json_list('saml_connections.json', conns)
+
+    def activate_saml_connection(self, domain: str) -> bool:
+        """Flips a draft connection live -- ONLY if a test login already
+        succeeded (test_verified_at IS NOT NULL). Returns False (not an
+        exception) if that precondition isn't met or the domain doesn't
+        exist, so the caller can return a clear "run the test first"
+        error rather than a generic failure."""
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE cgc_saml_connections
+                        SET active = TRUE, updated_at = NOW()
+                        WHERE domain = %s AND test_verified_at IS NOT NULL
+                    """, (domain,))
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                conns = self._read_json_list('saml_connections.json')
+                for r in conns:
+                    if r.get('domain') == domain and r.get('test_verified_at'):
+                        r['active'] = True
+                        r['updated_at'] = datetime.now(timezone.utc).isoformat()
+                        self._write_json_list('saml_connections.json', conns)
+                        return True
+                return False
+
+    def delete_saml_connection(self, domain: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM cgc_saml_connections WHERE domain = %s", (domain,))
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                conns = self._read_json_list('saml_connections.json')
+                remaining = [r for r in conns if r.get('domain') != domain]
+                found = len(remaining) != len(conns)
+                if found:
+                    self._write_json_list('saml_connections.json', remaining)
+                return found
 
     def list_saml_connections(self) -> List[Dict[str, Any]]:
         if self.use_postgres:

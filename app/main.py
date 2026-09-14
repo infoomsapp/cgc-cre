@@ -659,11 +659,16 @@ async def revoke_api_key(key_id: str, user=Depends(require_admin)) -> Dict[str, 
     return app.auth.revoke_api_key(key_id)
 
 
-# Enterprise SAML SSO connections -- admin-provisioned (require_admin), not
-# self-service. See api/v1/endpoints/saml_sso.py's header comment for why:
-# a malformed cert/URL from a customer's IT admin silently locks their
-# whole company out of login, so onboarding a real connection is
-# realistically a white-glove, hands-on setup for this pass.
+# Enterprise SAML SSO connections. Two paths now: this admin one
+# (require_admin, unchanged -- an operator can still directly create or
+# fix a LIVE connection, e.g. rotating a customer's IdP cert) and the
+# self-service one below (2026-09-14). Self-service exists specifically
+# to close the operational risk that made this admin-only in the first
+# place -- a malformed cert/URL used to silently lock a whole company out
+# of login -- via a mandatory draft -> test-login -> activate sequence
+# instead of a same-domain-email caller being trusted to go live
+# immediately. See api/v1/endpoints/saml_sso.py's header comment for the
+# full SP-initiated-only / never-hand-rolled-crypto posture both paths share.
 class SamlConnectionIn(BaseModel):
     domain: str
     idp_entity_id: str
@@ -683,6 +688,78 @@ async def create_saml_connection(payload: SamlConnectionIn, user=Depends(require
 @app.get("/admin/saml-connections", tags=["Admin"])
 async def list_saml_connections(user=Depends(require_admin)) -> Dict[str, Any]:
     return {"connections": app.db.list_saml_connections()}
+
+
+def _domain_from_email(email: str) -> Optional[str]:
+    """Duplicated from api/v1/endpoints/saml_sso.py deliberately -- a
+    2-line helper, not worth a cross-module import for (same call this
+    codebase already made for _owns_app_source in launch_readiness.py)."""
+    if "@" not in email:
+        return None
+    return email.rsplit("@", 1)[-1].strip().lower()
+
+
+def _require_own_saml_domain(user: Dict[str, Any], domain: str) -> None:
+    """Domain-ownership check for self-service SAML (2026-09-14): the
+    caller's own account email must be @domain. Deliberately the
+    lightest-weight option, not DNS TXT verification -- doesn't prove the
+    caller is domain IT/admin staff, only that they hold a real mailbox
+    there, but pasting working IdP metadata (Entity ID, SSO URL,
+    certificate) already requires real access to that IdP's admin
+    console, which is a much higher bar than the email check alone. A
+    stronger verification method (DNS TXT record) is a real, disclosed
+    gap here, not silently assumed solved."""
+    if _domain_from_email(user.get("email", "")) != domain:
+        raise HTTPException(status_code=403, detail="You can only manage SAML connections for your own email domain")
+
+
+@app.post("/tenants/saml-connections", tags=["Admin"])
+async def create_my_saml_connection(payload: SamlConnectionIn, user=Depends(get_current_user)) -> Dict[str, Any]:
+    domain = payload.domain.strip().lower()
+    _require_own_saml_domain(user, domain)
+    if not check_rate_limit(f"saml_self_service:{user['email']}", 3, 3600):
+        raise HTTPException(status_code=429, detail="Too many SAML connection attempts — try again later")
+
+    row = app.db.create_saml_connection_draft(
+        domain, payload.idp_entity_id.strip(), payload.idp_sso_url.strip(),
+        payload.idp_x509_cert.strip(), created_by=user["email"],
+    )
+    if row is None:
+        raise HTTPException(status_code=409, detail=f"A SAML connection for '{domain}' already exists")
+    return row
+
+
+@app.get("/tenants/saml-connections/{domain}", tags=["Admin"])
+async def get_my_saml_connection(domain: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    domain = domain.strip().lower()
+    _require_own_saml_domain(user, domain)
+    row = app.db.get_saml_connection_any_status(domain)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No SAML connection for '{domain}'")
+    return row
+
+
+@app.post("/tenants/saml-connections/{domain}/activate", tags=["Admin"])
+async def activate_my_saml_connection(domain: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    domain = domain.strip().lower()
+    _require_own_saml_domain(user, domain)
+    ok = app.db.activate_saml_connection(domain)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No verified test login yet — sign in via GET /auth/saml/{domain}/login "
+                   f"with a real account at that domain first, then activate.",
+        )
+    logger.info(f"[saml] self-service connection activated: domain={domain} by={user['email']}")
+    return {"active": True}
+
+
+@app.delete("/tenants/saml-connections/{domain}", tags=["Admin"])
+async def delete_my_saml_connection(domain: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    domain = domain.strip().lower()
+    _require_own_saml_domain(user, domain)
+    deleted = app.db.delete_saml_connection(domain)
+    return {"deleted": deleted}
 
 # =========================
 # SELF-SERVE TENANT ONBOARDING (was a real, disclosed gap: every
