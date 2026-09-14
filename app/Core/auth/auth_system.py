@@ -64,6 +64,29 @@ class AuthSystem:
         env_secret = os.getenv("JWT_SECRET")
         self.jwt_secret = jwt_secret or env_secret
         if not self.jwt_secret:
+            # 2026-09-14 audit follow-up: this used to silently fall back
+            # to an ephemeral secret in EVERY environment, production
+            # included, on nothing stronger than a print() nobody
+            # monitors. On Vercel's serverless model that's actively
+            # dangerous, not just sloppy -- a fresh secret is generated
+            # per cold start, so every existing session/API-key JWT would
+            # start failing verification the moment a new instance spins
+            # up, with no error louder than a log line. VERCEL_ENV is set
+            # automatically by the platform (no config needed) to
+            # "production" only for the real production deployment, so
+            # this fails loudly and immediately there instead of
+            # degrading into flaky, unexplained 401s in prod. main.py's
+            # own AuthSystem() call site already wraps this in try/except
+            # (see its comment) specifically so a raise here takes down
+            # only auth-gated routes (clean 503s), not the whole app.
+            if os.getenv("VERCEL_ENV") == "production":
+                raise RuntimeError(
+                    "JWT_SECRET is not set in the production environment -- "
+                    "refusing to start with an ephemeral per-instance secret "
+                    "that would silently invalidate sessions on every cold "
+                    "start. Set JWT_SECRET in Vercel's project environment "
+                    "variables."
+                )
             # For dev only: generate ephemeral secret. Was
             # self._generate_secret() -- a method that never existed on
             # this class, so this fallback path AttributeError'd instead

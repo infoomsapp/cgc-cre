@@ -921,6 +921,16 @@ async def set_my_webhook(app_source: str, payload: WebhookIn, user=Depends(get_c
     if not payload.url.startswith("https://"):
         raise HTTPException(status_code=400, detail="Webhook URL must be https://")
 
+    # 2026-09-14 audit follow-up: every other self-service config-write
+    # endpoint (key regenerate, tenant self-signup) already has a per-account
+    # rate limit -- this one and the weighting-override PUT below didn't.
+    # Not attacker-exploitable without a valid token (ownership-checked),
+    # but a compromised/buggy token holder hammering either endpoint still
+    # generates real load against the shared Postgres pool every other
+    # tenant depends on -- same reasoning as tenant_key_regen's own limit.
+    if not check_rate_limit(f"tenant_webhook_write:{user['email']}", 10, 3600):
+        raise HTTPException(status_code=429, detail="Too many webhook config changes — try again later")
+
     secret = "whsec_" + secrets.token_urlsafe(32)
     row = app.db.save_webhook(app_source, payload.url, secret, created_by=user["email"])
     return {
@@ -934,6 +944,8 @@ async def set_my_webhook(app_source: str, payload: WebhookIn, user=Depends(get_c
 async def delete_my_webhook(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
     if not _owns_app_source(app_source, user["email"]):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_webhook_write:{user['email']}", 10, 3600):
+        raise HTTPException(status_code=429, detail="Too many webhook config changes — try again later")
     deleted = app.db.delete_webhook(app_source)
     return {"deleted": deleted}
 
@@ -988,6 +1000,8 @@ async def set_my_weighting_override(
 ) -> Dict[str, Any]:
     if not _owns_app_source(app_source, user["email"]):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_weighting_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many weighting changes — try again later")
     sensitivity_level = sensitivity_level.upper()
     if sensitivity_level not in _VALID_SENSITIVITY_LEVELS:
         raise HTTPException(status_code=400, detail=f"sensitivity_level must be one of {sorted(_VALID_SENSITIVITY_LEVELS)}")
@@ -1006,6 +1020,8 @@ async def delete_my_weighting_override(
 ) -> Dict[str, Any]:
     if not _owns_app_source(app_source, user["email"]):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_weighting_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many weighting changes — try again later")
     deleted = app.db.delete_weighting_override(app_source, area.upper(), sensitivity_level.upper())
     return {"deleted": deleted}
 
