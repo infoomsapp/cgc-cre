@@ -57,28 +57,39 @@ class ErrorReportIn(BaseModel):
     context:     Optional[Dict[str, Any]] = None
 
 
+def _bound_app_source(request: Request) -> Optional[str]:
+    """2026-09-14: every route in this file used to check app_source
+    against ONLY the static ALLOWED_APP_SOURCES allowlist -- meaning a
+    real self-signup tenant's per-tenant API key (app_source bound
+    cryptographically at issuance, see AuthSystem.generate_api_key) got
+    a 400 from every one of them, same gap already closed on
+    /governance/reports and /governance/timeseries. Returns the
+    request's bound app_source if its token is a per-tenant key (already
+    verified by the router-level get_current_user dependency -- this
+    just reads the principal back out, same pattern used elsewhere in
+    this file for Slack-alert attribution), or None for an unbound
+    caller (the legacy shared CGC_SERVICE_API_KEY, or an admin session),
+    which keeps today's allowlist-checked behavior."""
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else auth_header
+    principal = request.app.auth.verify_token(token) if (token and request.app.auth) else None
+    return (principal or {}).get("app_source")
+
+
 @router.post("/error", summary="Ingest a client error report")
 async def report_error(payload: ErrorReportIn, request: Request) -> Dict[str, Any]:
     client_ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(f"monitor:{client_ip}", _RATE_LIMIT, _RATE_WINDOW):
         raise HTTPException(status_code=429, detail="Too many error reports — slow down")
 
-    # Gap 1 (per-tenant API keys): the router-level dependency
-    # (dependencies=[Depends(get_current_user)] in main.py) already
-    # verified this request's Bearer token before this handler ever runs --
-    # re-resolving it here (request.app.auth, not importing get_current_user,
-    # which would be a circular import against main.py) only reads the
-    # already-validated principal back out, to bind app_source to it. A
-    # per-tenant key overrides whatever payload.app_source claims; the
-    # legacy shared key (no bound app_source) keeps today's behavior --
-    # trust the payload, checked against the static allowlist below.
-    auth_header = request.headers.get("authorization", "")
-    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else auth_header
-    principal = request.app.auth.verify_token(token) if (token and request.app.auth) else None
-    bound_app_source = (principal or {}).get("app_source")
-
+    # A per-tenant key's bound app_source is already cryptographically
+    # verified at issuance -- trusted outright, no allowlist check. Only
+    # an UNBOUND caller (the legacy shared CGC_SERVICE_API_KEY, or an
+    # admin session) falls back to the static allowlist, since only then
+    # is app_source coming from an untrusted, caller-declared payload field.
+    bound_app_source = _bound_app_source(request)
     app_source = bound_app_source or payload.app_source
-    if app_source not in ALLOWED_APP_SOURCES:
+    if not bound_app_source and app_source not in ALLOWED_APP_SOURCES:
         raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
     severity = payload.severity if payload.severity in ALLOWED_SEVERITIES else "error"
 
@@ -107,27 +118,46 @@ async def report_error(payload: ErrorReportIn, request: Request) -> Dict[str, An
 
 @router.get("/errors", summary="List recent error reports")
 async def list_errors(
+    request: Request,
     app_source: Optional[str] = Query(None),
     resolved:   Optional[bool] = Query(None),
     since_days: Optional[int] = Query(None, ge=1, le=365),
     limit:      int = Query(100, ge=1, le=1000),
 ) -> Dict[str, Any]:
+    # 2026-09-14: a per-tenant key's bound app_source now OVERRIDES the
+    # query param instead of being ignored -- previously any authenticated
+    # caller could pass a different app_source and read another tenant's
+    # error reports (this endpoint had no scoping at all, unlike every
+    # ownership-checked /tenants/my-apps/* route). An unbound caller
+    # (legacy shared key / admin) keeps today's unrestricted behavior.
+    bound_app_source = _bound_app_source(request)
     db = get_database()
     reports = db.get_error_reports(
-        app_source=app_source, resolved=resolved, since_days=since_days, limit=limit
+        app_source=bound_app_source or app_source, resolved=resolved, since_days=since_days, limit=limit
     )
     return {"total": len(reports), "reports": reports}
 
 
 @router.get("/errors/stats", summary="Aggregated error stats")
-async def error_stats(days: int = Query(7, ge=1, le=90)) -> Dict[str, Any]:
+async def error_stats(request: Request, days: int = Query(7, ge=1, le=90)) -> Dict[str, Any]:
+    # Same per-tenant scoping as list_errors above -- was global across
+    # every app_source for any authenticated caller before this.
+    bound_app_source = _bound_app_source(request)
     db = get_database()
-    return db.get_error_stats(days=days)
+    return db.get_error_stats(days=days, app_source=bound_app_source)
 
 
 @router.post("/errors/{fingerprint}/resolve", summary="Mark an error report resolved")
-async def resolve_error(fingerprint: str) -> Dict[str, Any]:
+async def resolve_error(fingerprint: str, request: Request) -> Dict[str, Any]:
     db = get_database()
+    bound_app_source = _bound_app_source(request)
+    if bound_app_source:
+        # A per-tenant key may only resolve its OWN app_source's reports --
+        # was reachable for any fingerprint by any authenticated caller
+        # before this, same class of gap as list_errors above.
+        existing = db.get_error_report(fingerprint)
+        if existing and existing.get("app_source") != bound_app_source:
+            raise HTTPException(status_code=403, detail="You don't own this error report")
     ok = db.resolve_error_report(fingerprint)
     if not ok:
         raise HTTPException(status_code=404, detail="No error report with that fingerprint")
@@ -135,8 +165,13 @@ async def resolve_error(fingerprint: str) -> Dict[str, Any]:
 
 
 @router.delete("/errors/{fingerprint}", summary="Permanently delete an error report")
-async def delete_error(fingerprint: str) -> Dict[str, Any]:
+async def delete_error(fingerprint: str, request: Request) -> Dict[str, Any]:
     db = get_database()
+    bound_app_source = _bound_app_source(request)
+    if bound_app_source:
+        existing = db.get_error_report(fingerprint)
+        if existing and existing.get("app_source") != bound_app_source:
+            raise HTTPException(status_code=403, detail="You don't own this error report")
     ok = db.delete_error_report(fingerprint)
     if not ok:
         raise HTTPException(status_code=404, detail="No error report with that fingerprint")
@@ -148,9 +183,21 @@ class BulkDeleteIn(BaseModel):
 
 
 @router.post("/errors/bulk-delete", summary="Permanently delete multiple error reports in one call")
-async def bulk_delete_errors(payload: BulkDeleteIn) -> Dict[str, Any]:
+async def bulk_delete_errors(payload: BulkDeleteIn, request: Request) -> Dict[str, Any]:
     db = get_database()
-    deleted = db.delete_error_reports(payload.fingerprints)
+    bound_app_source = _bound_app_source(request)
+    fingerprints = payload.fingerprints
+    if bound_app_source:
+        # Same per-tenant ownership check as the single-delete route above,
+        # applied per fingerprint -- silently drops any fingerprint that
+        # isn't this caller's own rather than 403ing the whole batch, since
+        # a bulk op mixing owned and not-owned items should still make
+        # progress on the ones it legitimately can.
+        fingerprints = [
+            fp for fp in fingerprints
+            if (existing := db.get_error_report(fp)) is None or existing.get("app_source") == bound_app_source
+        ]
+    deleted = db.delete_error_reports(fingerprints)
     return {"deleted": deleted, "requested": len(payload.fingerprints)}
 
 

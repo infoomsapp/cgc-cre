@@ -263,23 +263,25 @@ class PoDInterceptor:
 
         # Load or generate RSA signing key.
         #
-        # Unlike app/modules/scm/scmmodule.py's LocalKMSProvider (which reads
-        # CGC_SCM_RSA_PRIV_V1/CGC_SCM_RSA_PUB_V1 from the environment), this
-        # class had NO env-var fallback at all -- private_key_pem is a
-        # constructor param main.py's only call site
-        # (PoDInterceptor(signing_key_id="cgc-pod-v1")) never actually
-        # supplies, so the `else` branch below always ran: a brand-new RSA
-        # keypair, generated in memory, on every single cold start, never
-        # persisted anywhere. On Vercel that means every fresh instance --
-        # confirmed live via "[PoD] Using ephemeral RSA key" on every single
-        # boot -- which breaks PoD's whole non-repudiation premise: a
-        # triplet_signature signed by one instance can never be verified
-        # once that instance recycles, since the public key that could
-        # verify it was never stored anywhere. Same CGC_POD_RSA_PRIV_V1/
-        # CGC_POD_RSA_PUB_V1 base64-PEM env-var pattern as SCM's
-        # LocalKMSProvider, so the same key material generated once (either
-        # here or by hand) works for both if the user chooses to share one
-        # keypair, or two independent ones if kept separate.
+        # Same CGC_POD_RSA_PRIV_V1/CGC_POD_RSA_PUB_V1 base64-PEM env-var
+        # pattern as app/modules/scm/scmmodule.py's LocalKMSProvider (which
+        # reads CGC_SCM_RSA_PRIV_V1/CGC_SCM_RSA_PUB_V1) -- private_key_pem
+        # is a constructor param main.py's only call site
+        # (PoDInterceptor(signing_key_id="cgc-pod-v1")) never supplies
+        # directly, but the env-var fallback below covers that: it was
+        # simply never SET (confirmed 2026-09-14 -- CGC_POD_RSA_PRIV_V1 was
+        # absent from .env entirely, only its PUB half existed), not a code
+        # gap. With nothing to load, the `else` branch generated a brand-new
+        # RSA keypair in memory on every cold start, never persisted --
+        # confirmed live via "[PoD] Using ephemeral RSA key" on every boot,
+        # breaking PoD's whole non-repudiation premise: a triplet_signature
+        # signed by one instance could never be verified once that instance
+        # recycled, since the public key that could verify it was never
+        # stored anywhere. Fixed by generating and setting a real, persistent
+        # keypair (.env locally, same value needed in Vercel's project env
+        # vars for production) -- verified: two separate PoDInterceptor
+        # instances now load the identical key, and a signature from one
+        # verifies correctly against the other's public key.
         if not private_key_pem:
             priv_b64 = os.getenv("CGC_POD_RSA_PRIV_V1")
             if priv_b64:

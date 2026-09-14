@@ -84,9 +84,29 @@ _SUPABASE_PROJECT_REFS: Dict[str, str] = {
 }
 
 
-def _require_valid_app_source(app_source: str) -> None:
-    if app_source not in ALLOWED_APP_SOURCES:
-        raise HTTPException(status_code=400, detail=f"Unknown app_source: {app_source}")
+def _require_valid_app_source(request: Request, app_source: str) -> None:
+    """2026-09-14: was allowlist-only -- every route in this file 400'd
+    for any self-signup tenant's app_source, since that allowlist only
+    ever covered the 3 first-party apps. Now also accepts a per-tenant
+    API key's bound app_source (cryptographically verified at issuance)
+    or an app_source this account has ever claimed via /tenants/self-signup
+    -- same ownership check /tenants/my-apps/* routes use in main.py,
+    duplicated locally here rather than imported to avoid a circular
+    import (main.py is what mounts this router)."""
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else auth_header
+    principal = request.app.auth.verify_token(token) if (token and request.app.auth) else None
+    bound_app_source = (principal or {}).get("app_source")
+    if bound_app_source == app_source:
+        return
+    if app_source in ALLOWED_APP_SOURCES:
+        return
+    email = (principal or {}).get("email")
+    if email and request.app.auth and any(
+        k.get("created_by") == email for k in request.app.auth.list_api_keys(app_source)
+    ):
+        return
+    raise HTTPException(status_code=403, detail=f"You don't have access to app_source: {app_source}")
 
 
 class ChecklistItemIn(BaseModel):
@@ -112,8 +132,8 @@ class LaunchErrorIn(BaseModel):
 
 
 @router.get("/{app_source}/summary", summary="Aggregate launch-readiness view")
-async def get_summary(app_source: str) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+async def get_summary(app_source: str, request: Request) -> Dict[str, Any]:
+    _require_valid_app_source(request, app_source)
     db = get_database()
     items = db.list_checklist_items(app_source)
     snapshots = db.get_latest_snapshots(app_source)
@@ -135,8 +155,8 @@ async def get_summary(app_source: str) -> Dict[str, Any]:
 
 
 @router.get("/{app_source}/checklist", summary="List manual checklist items")
-async def list_checklist(app_source: str) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+async def list_checklist(app_source: str, request: Request) -> Dict[str, Any]:
+    _require_valid_app_source(request, app_source)
     db = get_database()
     return {"items": db.list_checklist_items(app_source)}
 
@@ -145,7 +165,7 @@ async def list_checklist(app_source: str) -> Dict[str, Any]:
 async def upsert_checklist_item(
     app_source: str, payload: ChecklistItemIn, request: Request
 ) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+    _require_valid_app_source(request, app_source)
 
     client_ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(f"launch_readiness:write:{client_ip}", _RATE_LIMIT, _RATE_WINDOW):
@@ -177,8 +197,8 @@ async def upsert_checklist_item(
 
 
 @router.delete("/{app_source}/checklist/{item_id}", summary="Delete a manual checklist item")
-async def delete_checklist_item(app_source: str, item_id: int) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+async def delete_checklist_item(app_source: str, item_id: int, request: Request) -> Dict[str, Any]:
+    _require_valid_app_source(request, app_source)
     db = get_database()
     ok = db.delete_checklist_item(item_id, app_source)
     if not ok:
@@ -190,7 +210,7 @@ async def delete_checklist_item(app_source: str, item_id: int) -> Dict[str, Any]
 async def report_launch_error(
     app_source: str, payload: LaunchErrorIn, request: Request
 ) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+    _require_valid_app_source(request, app_source)
 
     client_ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(f"launch_readiness:write:{client_ip}", _RATE_LIMIT, _RATE_WINDOW):
@@ -211,8 +231,8 @@ async def report_launch_error(
 
 
 @router.get("/{app_source}/errors", summary="List launch/submission-process errors")
-async def list_launch_errors(app_source: str, status: Optional[str] = None) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+async def list_launch_errors(app_source: str, request: Request, status: Optional[str] = None) -> Dict[str, Any]:
+    _require_valid_app_source(request, app_source)
     if status is not None and status not in {"open", "resolved"}:
         raise HTTPException(status_code=400, detail="status must be 'open' or 'resolved'")
     db = get_database()
@@ -221,7 +241,7 @@ async def list_launch_errors(app_source: str, status: Optional[str] = None) -> D
 
 @router.post("/{app_source}/errors/{error_id}/resolve", summary="Mark one launch error resolved")
 async def resolve_launch_error(app_source: str, error_id: int, request: Request) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+    _require_valid_app_source(request, app_source)
 
     resolved_by = None
     auth_header = request.headers.get("authorization", "")
@@ -239,7 +259,7 @@ async def resolve_launch_error(app_source: str, error_id: int, request: Request)
 
 @router.post("/{app_source}/refresh", summary="Re-pull automated signals (repo manifest + Supabase advisors)")
 async def refresh_signals(app_source: str, request: Request) -> Dict[str, Any]:
-    _require_valid_app_source(app_source)
+    _require_valid_app_source(request, app_source)
 
     client_ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(f"launch_readiness:refresh:{client_ip}", _REFRESH_RATE_LIMIT, _REFRESH_RATE_WINDOW):

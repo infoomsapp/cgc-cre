@@ -1949,6 +1949,24 @@ class Database:
                 self._write_json_list('error_reports.json', reports[-5000:])
                 return {'fingerprint': fingerprint, 'first_seen': True, 'count': 1}
 
+    def get_error_report(self, fingerprint: str) -> Optional[Dict[str, Any]]:
+        """Single-report lookup by fingerprint -- added 2026-09-14 so
+        resolve/delete can check which app_source a report actually
+        belongs to before acting on it (a per-tenant API key must not be
+        able to resolve/delete another tenant's report just by knowing or
+        guessing its fingerprint)."""
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM cgc_error_reports WHERE fingerprint = %s", (fingerprint,))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            for r in self._read_json_list('error_reports.json'):
+                if r.get('fingerprint') == fingerprint:
+                    return r
+            return None
+
     def get_error_reports(
         self, app_source: Optional[str] = None, resolved: Optional[bool] = None,
         since_days: Optional[int] = None, limit: int = 100
@@ -1982,8 +2000,8 @@ class Database:
             reports.sort(key=lambda r: r.get('last_seen', ''), reverse=True)
             return reports[:limit]
 
-    def get_error_stats(self, days: int = 7) -> Dict[str, Any]:
-        reports = self.get_error_reports(since_days=days, limit=100000)
+    def get_error_stats(self, days: int = 7, app_source: Optional[str] = None) -> Dict[str, Any]:
+        reports = self.get_error_reports(app_source=app_source, since_days=days, limit=100000)
         by_app: Dict[str, int] = {}
         by_severity: Dict[str, int] = {}
         for r in reports:
