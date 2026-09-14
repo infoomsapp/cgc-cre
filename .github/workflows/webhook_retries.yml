@@ -1,0 +1,34 @@
+name: Process webhook retries
+
+# Works through cgc_webhook_retry_queue every 10 min -- see the docstring
+# on POST /admin/webhooks/process-retries (app/main.py) for the full
+# backoff schedule and why this can't just retry in-process on Vercel.
+# Requires CGC_SERVICE_API_KEY and BACKEND_URL as repo secrets (same
+# BACKEND_URL used by any other scheduled job hitting this API).
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Process due webhook retries
+        run: |
+          if [ -z "${{ secrets.BACKEND_URL }}" ] || [ -z "${{ secrets.CGC_SERVICE_API_KEY }}" ]; then
+            echo "::error::Falta BACKEND_URL o CGC_SERVICE_API_KEY -- configuralos en Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ secrets.BACKEND_URL }}/admin/webhooks/process-retries" \
+            -H "Authorization: Bearer ${{ secrets.CGC_SERVICE_API_KEY }}" \
+            --max-time 60)
+          STATUS=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP $STATUS: $BODY"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::process-retries returned $STATUS"
+            exit 1
+          fi

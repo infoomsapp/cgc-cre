@@ -2471,6 +2471,158 @@ class Database:
                         return
 
     # ======================================================================
+    # WEBHOOK RETRY QUEUE (2026-09-14 -- closes a disclosed gap: a failed
+    # webhook delivery used to be logged and forgotten, permanently lost)
+    # ======================================================================
+    # Vercel's serverless runtime gives no guarantee that anything scheduled
+    # AFTER a response is sent actually finishes running (no persistent
+    # worker to hand a background task to -- see _deliver_webhook's own
+    # docstring on why the first attempt is synchronous, not fire-and-forget).
+    # So retries can't live in-process either: a failed delivery is queued
+    # here instead, and a separate scheduled job (GitHub Actions cron, see
+    # .github/workflows/webhook_retries.yml) calls POST
+    # /internal/webhooks/process-retries periodically to work through it.
+    # Exponential backoff: 5min, 15min, 1h, 4h, 24h -- 5 attempts total
+    # (including the original synchronous one), then permanently given up.
+    WEBHOOK_RETRY_BACKOFF_MINUTES = [5, 15, 60, 240, 1440]
+    WEBHOOK_RETRY_MAX_ATTEMPTS = len(WEBHOOK_RETRY_BACKOFF_MINUTES)
+
+    def _create_webhook_retry_queue_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_webhook_retry_queue (
+                        id            BIGSERIAL PRIMARY KEY,
+                        app_source    VARCHAR(50) NOT NULL,
+                        event         VARCHAR(100) NOT NULL,
+                        payload       JSONB NOT NULL,
+                        attempts      INTEGER NOT NULL DEFAULT 0,
+                        next_retry_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                        status        VARCHAR(20) NOT NULL DEFAULT 'pending',
+                        last_error    TEXT,
+                        created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        delivered_at  TIMESTAMP WITH TIME ZONE
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_webhook_retry_queue_due
+                        ON cgc_webhook_retry_queue (status, next_retry_at)
+                """)
+                logger.info("Webhook retry queue schema ready")
+        except Exception as e:
+            logger.warning(f"_create_webhook_retry_queue_schema failed (non-fatal): {e}")
+
+    def enqueue_webhook_retry(self, app_source: str, event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Queue a retry after the initial synchronous delivery attempt
+        already failed. First retry is scheduled at the first backoff
+        interval, not immediately -- an endpoint that's down for a few
+        seconds shouldn't get hammered right away."""
+        first_delay = self.WEBHOOK_RETRY_BACKOFF_MINUTES[0]
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_webhook_retry_queue (app_source, event, payload, next_retry_at)
+                        VALUES (%s, %s, %s, NOW() + (%s || ' minutes')::interval)
+                        RETURNING *
+                    """, (app_source, event, Json(payload), first_delay))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                queue = self._read_json_list('webhook_retry_queue.json')
+                now = datetime.now(timezone.utc)
+                new_row = {
+                    'id': int(time.time() * 1000),
+                    'app_source': app_source, 'event': event, 'payload': payload,
+                    'attempts': 0,
+                    'next_retry_at': (now + timedelta(minutes=first_delay)).isoformat(),
+                    'status': 'pending', 'last_error': None,
+                    'created_at': now.isoformat(), 'delivered_at': None,
+                }
+                queue.append(new_row)
+                self._write_json_list('webhook_retry_queue.json', queue)
+                return new_row
+
+    def get_due_webhook_retries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT * FROM cgc_webhook_retry_queue
+                        WHERE status = 'pending' AND next_retry_at <= NOW()
+                        ORDER BY next_retry_at
+                        LIMIT %s
+                    """, (limit,))
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            queue = self._read_json_list('webhook_retry_queue.json')
+            now = datetime.now(timezone.utc)
+            due = [
+                r for r in queue
+                if r.get('status') == 'pending'
+                and datetime.fromisoformat(r['next_retry_at']) <= now
+            ]
+            due.sort(key=lambda r: r['next_retry_at'])
+            return due[:limit]
+
+    def record_webhook_retry_attempt(self, retry_id: int, success: bool, error: Optional[str] = None) -> None:
+        """On success: mark delivered, done. On failure: bump attempts and
+        either schedule the next backoff step or give up permanently once
+        WEBHOOK_RETRY_MAX_ATTEMPTS is reached."""
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if success:
+                        cur.execute("""
+                            UPDATE cgc_webhook_retry_queue
+                            SET status = 'delivered', delivered_at = NOW()
+                            WHERE id = %s
+                        """, (retry_id,))
+                        return
+                    cur.execute("SELECT attempts FROM cgc_webhook_retry_queue WHERE id = %s", (retry_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return
+                    new_attempts = row['attempts'] + 1
+                    if new_attempts >= self.WEBHOOK_RETRY_MAX_ATTEMPTS:
+                        cur.execute("""
+                            UPDATE cgc_webhook_retry_queue
+                            SET attempts = %s, status = 'failed_permanently', last_error = %s
+                            WHERE id = %s
+                        """, (new_attempts, error, retry_id))
+                    else:
+                        delay = self.WEBHOOK_RETRY_BACKOFF_MINUTES[new_attempts]
+                        cur.execute("""
+                            UPDATE cgc_webhook_retry_queue
+                            SET attempts = %s, last_error = %s,
+                                next_retry_at = NOW() + (%s || ' minutes')::interval
+                            WHERE id = %s
+                        """, (new_attempts, error, delay, retry_id))
+        else:
+            with self.json_lock:
+                queue = self._read_json_list('webhook_retry_queue.json')
+                now = datetime.now(timezone.utc)
+                for r in queue:
+                    if r.get('id') == retry_id:
+                        if success:
+                            r['status'] = 'delivered'
+                            r['delivered_at'] = now.isoformat()
+                        else:
+                            r['attempts'] += 1
+                            r['last_error'] = error
+                            if r['attempts'] >= self.WEBHOOK_RETRY_MAX_ATTEMPTS:
+                                r['status'] = 'failed_permanently'
+                            else:
+                                delay = self.WEBHOOK_RETRY_BACKOFF_MINUTES[r['attempts']]
+                                r['next_retry_at'] = (now + timedelta(minutes=delay)).isoformat()
+                        self._write_json_list('webhook_retry_queue.json', queue)
+                        return
+
+    # ======================================================================
     # CALIBRATION CHANGELOG (versioned history for PAN/ECM/PFM/SDA scoring rules)
     # ======================================================================
     # CGC Core's four scoring modules (PAN/ECM/PFM/SDA) read their governance

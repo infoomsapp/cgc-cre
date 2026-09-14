@@ -540,6 +540,69 @@ async def check_key_rotation(user=Depends(require_admin_or_service)) -> Dict[str
     return {"stale_keys": stale, "threshold_days": _KEY_ROTATION_WARNING_DAYS}
 
 
+@app.post("/admin/webhooks/process-retries", tags=["Admin"])
+async def process_webhook_retries(user=Depends(require_admin_or_service)) -> Dict[str, Any]:
+    """
+    Works through cgc_webhook_retry_queue: every row due for a retry
+    (next_retry_at <= now) gets one more delivery attempt, signed exactly
+    like the original synchronous attempt in _deliver_webhook. Success
+    marks the row 'delivered'; failure bumps the attempt count and either
+    reschedules at the next backoff step or gives up permanently after
+    Database.WEBHOOK_RETRY_MAX_ATTEMPTS (see that constant's own comment
+    for the full 5min/15min/1h/4h/24h schedule).
+
+    No scheduler of its own -- same posture as /admin/cleanup/guard-tables
+    and /admin/keys/rotation-check above: wire this up to a recurring
+    trigger (this repo uses a GitHub Actions cron, see
+    .github/workflows/webhook_retries.yml). Bounded to 50 retries per call
+    so one invocation can't run long enough to risk a serverless timeout;
+    a busy queue just gets worked down over a few consecutive cron ticks.
+    """
+    due = app.db.get_due_webhook_retries(limit=50)
+    results = {"attempted": len(due), "delivered": 0, "rescheduled": 0, "failed_permanently": 0}
+
+    for retry in due:
+        hook = app.db.get_webhook(retry["app_source"])
+        if not hook or not hook.get("active"):
+            # the customer removed their webhook since this was queued --
+            # nothing left to retry against, stop trying.
+            app.db.record_webhook_retry_attempt(retry["id"], success=False, error="webhook no longer configured")
+            results["failed_permanently"] += 1
+            continue
+
+        body = json.dumps(
+            {"event": retry["event"], "app_source": retry["app_source"], "data": retry["payload"]},
+            default=str, sort_keys=True,
+        )
+        signature = hmac.new(hook["secret"].encode(), body.encode(), hashlib.sha256).hexdigest()
+
+        success, error = False, None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    hook["url"], data=body,
+                    headers={"Content-Type": "application/json", "X-CGC-Signature": f"sha256={signature}"},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    success = 200 <= resp.status < 300
+                    if not success:
+                        error = f"http_{resp.status}"
+        except asyncio.TimeoutError:
+            error = "timeout"
+        except Exception as e:
+            error = str(e)[:200]
+
+        app.db.record_webhook_retry_attempt(retry["id"], success=success, error=error)
+        if success:
+            results["delivered"] += 1
+        elif retry["attempts"] + 1 >= app.db.WEBHOOK_RETRY_MAX_ATTEMPTS:
+            results["failed_permanently"] += 1
+        else:
+            results["rescheduled"] += 1
+
+    return results
+
+
 # =========================
 # BILLING + TENANT
 # =========================
@@ -917,6 +980,17 @@ async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any])
         app.db.record_webhook_delivery(app_source, status)
     except Exception as e:
         logger.warning(f"[webhook] recording delivery status failed (non-fatal): {e}")
+
+    # 2026-09-14: the synchronous attempt above failed -- queue it instead
+    # of losing it. A separate scheduled job (see
+    # .github/workflows/webhook_retries.yml) works through this queue with
+    # exponential backoff (Database.WEBHOOK_RETRY_BACKOFF_MINUTES); nothing
+    # about /governance/decision's own latency/response changes.
+    if not status.startswith("http_2"):
+        try:
+            app.db.enqueue_webhook_retry(app_source, event, payload)
+        except Exception as e:
+            logger.warning(f"[webhook] enqueueing retry failed (non-fatal): {e}")
 
 
 @app.get("/tenants/my-apps/{app_source}/decisions", tags=["Admin"])
