@@ -1668,6 +1668,490 @@ class Database:
         except Exception as e:
             logger.error(f"Public schema grant lockdown failed (non-fatal): {e}")
 
+    def _harden_legacy_pod_chain_functions(self):
+        """
+        2026-09-14: pins search_path on 11 pre-existing database functions
+        (12 counting cgc_compute_pod_hash's 2 overloads) that support a
+        LEGACY, parallel PoD/decision schema -- public.decisions,
+        public.pod_chain, public.decision_modules, public.prefilter_results
+        -- none of which is created anywhere in this codebase's own
+        migration methods (_create_tables/_create_pod_schema/etc. build a
+        completely different, schema-qualified set: cgc_pod.pod_ledger,
+        cgc_tco.audit_trail, and friends). These functions/tables predate
+        this Python migration system and were provisioned some other way
+        (direct SQL against Supabase, before this repo's current
+        architecture) -- found live during the 2026-09-14 security-advisor
+        sweep (function_search_path_mutable, 13 findings) and fixed by
+        hand against production first, verified there (a real INSERT into
+        pod_chain -- caught and fixed a real regression along the way,
+        see git log), THEN captured back into this method so the fix
+        survives a fresh bootstrap of an environment that happens to also
+        have this legacy schema, instead of being a live-database-only
+        patch nobody remembers exists.
+
+        Deliberately does NOT create the underlying tables (decisions,
+        pod_chain, decision_modules, prefilter_results) or the
+        cgc_jla.scm_security_policies / cgc_jla.get_active_security_policy
+        dependencies some of these functions reference -- that's a
+        separate, much bigger question (is this legacy schema still live,
+        should it be, does anything read it) this method takes no position
+        on. A plpgsql function body's internal SELECT/INSERT statements
+        aren't validated against the schema until actual execution, so
+        most of these are safe to create even where the legacy tables
+        don't exist -- they'd just error if ever invoked there, exactly
+        as before this method existed. One real exception, found live
+        (2026-09-14): cgc_append_pod_block declares RETURNS pod_chain (the
+        table's own composite row type), which Postgres DOES check at
+        CREATE FUNCTION time -- that one specific statement fails outright
+        without the table. Each statement below runs in its own
+        transaction (see the loop) so that failure only skips the
+        functions that genuinely need the missing table, not all 12.
+        """
+        if not self.use_postgres:
+            return
+
+        functions = [
+            """
+            CREATE OR REPLACE FUNCTION cgc_pod.prevent_pod_ledger_mutation()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             SECURITY DEFINER
+             SET search_path TO 'cgc_pod', 'public', 'extensions', 'pg_temp'
+            AS $function$
+            BEGIN
+              RAISE EXCEPTION
+                'pod_ledger is immutable — block #% cannot be % (CGC Core Patent 1: PoD)',
+                OLD.block_number,
+                TG_OP;
+              RETURN NULL;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_pod_chain_immutable()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             SECURITY DEFINER
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            BEGIN
+                RAISE EXCEPTION
+                    'pod_chain es inmutable — bloque #% no puede ser % (CGC Core PoD Patent)',
+                    OLD.block_number, TG_OP;
+                RETURN NULL;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_build_pod_hash_material(
+                p_block_number bigint, p_decision_id text, p_decided_at timestamp with time zone,
+                p_previous_pod_hash text, p_triplet_hash text, p_governance_outcome text,
+                p_anchor_tx text, p_created_at timestamp with time zone, p_hash_material_version text
+            )
+             RETURNS text
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            BEGIN
+                RETURN CONCAT_WS('|',
+                    COALESCE(p_block_number::TEXT, ''),
+                    COALESCE(p_decision_id, ''),
+                    COALESCE(p_decided_at::TEXT, ''),
+                    COALESCE(p_previous_pod_hash, ''),
+                    COALESCE(p_triplet_hash, ''),
+                    COALESCE(p_governance_outcome, ''),
+                    COALESCE(p_anchor_tx, ''),
+                    COALESCE(p_created_at::TEXT, ''),
+                    COALESCE(p_hash_material_version, '1.0.0')
+                );
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_compute_pod_hash(
+                p_block_number bigint, p_decision_id text, p_previous_hash text, p_triplet_hash text
+            )
+             RETURNS text
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            BEGIN
+                RETURN encode(
+                    digest(
+                        COALESCE(p_block_number::TEXT,'') || '|' ||
+                        COALESCE(p_decision_id,'') || '|' ||
+                        COALESCE(p_previous_hash,'') || '|' ||
+                        COALESCE(p_triplet_hash,''),
+                        'sha256'
+                    ),
+                    'hex'
+                );
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_compute_pod_hash(
+                p_block_number bigint, p_decision_id text, p_decided_at timestamp with time zone,
+                p_previous_pod_hash text, p_triplet_hash text, p_governance_outcome text,
+                p_anchor_tx text, p_created_at timestamp with time zone, p_hash_material_version text
+            )
+             RETURNS text
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            DECLARE
+                v_material TEXT;
+            BEGIN
+                v_material := public.cgc_build_pod_hash_material(
+                    p_block_number, p_decision_id, p_decided_at, p_previous_pod_hash,
+                    p_triplet_hash, p_governance_outcome, p_anchor_tx, p_created_at,
+                    p_hash_material_version
+                );
+                RETURN encode(digest(v_material, 'sha256'), 'hex');
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_check_pod_hash_unique()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            BEGIN
+                IF NEW.pod_hash IS NOT NULL THEN
+                    IF EXISTS (
+                        SELECT 1 FROM decisions
+                        WHERE  pod_hash = NEW.pod_hash
+                          AND  decision_id <> NEW.decision_id
+                    ) THEN
+                        RAISE EXCEPTION
+                            'pod_hash % ya existe en otra decisión — violación PoD unicidad',
+                            NEW.pod_hash;
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_enforce_decision_security_policy()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            DECLARE v_policy cgc_jla.scm_security_policies;
+            BEGIN
+                v_policy := cgc_jla.get_active_security_policy(NEW.area);
+
+                NEW.scm_policy_area    := v_policy.governance_area;
+                NEW.scm_policy_version := v_policy.version;
+
+                IF NEW.decision_status IN ('DECIDED','SEALED') THEN
+
+                    IF v_policy.encryption_required AND NOT NEW.encrypted_payload THEN
+                        RAISE EXCEPTION 'SCM violation: encryption required';
+                    END IF;
+
+                    IF v_policy.signing_required AND (NEW.signature IS NULL OR NEW.signature = '') THEN
+                        RAISE EXCEPTION 'SCM violation: signature required';
+                    END IF;
+
+                    IF v_policy.fingerprint_required AND (NEW.fingerprint IS NULL OR NEW.fingerprint = '') THEN
+                        RAISE EXCEPTION 'SCM violation: fingerprint required';
+                    END IF;
+
+                END IF;
+
+                RETURN NEW;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_enforce_pod_chain_security_policy()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            DECLARE
+                v_area   TEXT;
+                v_policy cgc_jla.scm_security_policies;
+            BEGIN
+                IF NEW.decision_id IS NULL THEN
+                    RETURN NEW;
+                END IF;
+
+                SELECT d.area
+                INTO v_area
+                FROM public.decisions d
+                WHERE d.decision_id = NEW.decision_id
+                  AND d.decided_at = NEW.decided_at
+                LIMIT 1;
+
+                IF v_area IS NULL THEN
+                    RAISE EXCEPTION
+                        'pod_chain enforcement failed: referenced decision (%) was not found',
+                        NEW.decision_id;
+                END IF;
+
+                v_policy := cgc_jla.get_active_security_policy(v_area);
+
+                NEW.hash_algorithm_used    := COALESCE(NEW.hash_algorithm_used, v_policy.hash_algorithm);
+                NEW.signing_algorithm_used := COALESCE(NEW.signing_algorithm_used, v_policy.signing_algorithm);
+
+                IF NEW.pod_hash IS NULL OR LENGTH(BTRIM(NEW.pod_hash)) = 0 THEN
+                    RAISE EXCEPTION
+                        'SCM/PoD violation for area %: pod_hash is required',
+                        v_policy.governance_area;
+                END IF;
+
+                IF v_policy.signing_required = TRUE
+                   AND (NEW.triplet_signature IS NULL OR LENGTH(BTRIM(NEW.triplet_signature)) = 0) THEN
+                    RAISE EXCEPTION
+                        'SCM/PoD violation for area %: triplet_signature is required',
+                        v_policy.governance_area;
+                END IF;
+
+                IF v_policy.fingerprint_required = TRUE
+                   AND (NEW.fingerprint IS NULL OR LENGTH(BTRIM(NEW.fingerprint)) = 0) THEN
+                    RAISE EXCEPTION
+                        'SCM/PoD violation for area %: fingerprint is required in pod_chain',
+                        v_policy.governance_area;
+                END IF;
+
+                IF LOWER(COALESCE(NEW.hash_algorithm_used, '')) <> LOWER(v_policy.hash_algorithm) THEN
+                    RAISE EXCEPTION
+                        'SCM/PoD violation for area %: pod_chain hash algorithm (%) must match (%)',
+                        v_policy.governance_area,
+                        NEW.hash_algorithm_used,
+                        v_policy.hash_algorithm;
+                END IF;
+
+                IF LOWER(COALESCE(NEW.signing_algorithm_used, '')) <> LOWER(v_policy.signing_algorithm) THEN
+                    RAISE EXCEPTION
+                        'SCM/PoD violation for area %: pod_chain signing algorithm (%) must match (%)',
+                        v_policy.governance_area,
+                        NEW.signing_algorithm_used,
+                        v_policy.signing_algorithm;
+                END IF;
+
+                RETURN NEW;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_validate_pod_chain_integrity()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            DECLARE
+                v_status TEXT;
+                v_prev_hash TEXT;
+                v_expected TEXT;
+            BEGIN
+                SELECT decision_status INTO v_status
+                FROM public.decisions
+                WHERE decision_id = NEW.decision_id
+                LIMIT 1;
+
+                IF v_status <> 'SEALED' THEN
+                    RETURN NEW;
+                END IF;
+
+                IF NEW.block_number > 1 THEN
+                    SELECT pod_hash INTO v_prev_hash
+                    FROM public.pod_chain
+                    WHERE block_number = NEW.block_number - 1;
+
+                    IF NEW.previous_pod_hash <> v_prev_hash THEN
+                        RAISE EXCEPTION 'PoD violation: broken chain';
+                    END IF;
+                END IF;
+
+                v_expected := public.cgc_compute_pod_hash(
+                    NEW.block_number,
+                    NEW.decision_id,
+                    NEW.previous_pod_hash,
+                    NEW.triplet_hash
+                );
+
+                IF NEW.pod_hash IS NULL THEN
+                    NEW.pod_hash := v_expected;
+                ELSIF NEW.pod_hash <> v_expected THEN
+                    RAISE EXCEPTION 'PoD violation: invalid hash';
+                END IF;
+
+                RETURN NEW;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_append_pod_block(
+                p_decision_id text, p_decided_at timestamp with time zone, p_triplet_hash text,
+                p_triplet_signature text, p_timestamp_token text, p_governance_outcome text,
+                p_anchor_tx text DEFAULT NULL::text, p_merkle_root text DEFAULT NULL::text,
+                p_anchored boolean DEFAULT false
+            )
+             RETURNS pod_chain
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            DECLARE
+                v_next_block_number BIGINT;
+                v_previous_pod_hash TEXT;
+                v_row public.pod_chain;
+            BEGIN
+                LOCK TABLE public.pod_chain IN EXCLUSIVE MODE;
+
+                SELECT COALESCE(MAX(block_number), 0) + 1
+                INTO v_next_block_number
+                FROM public.pod_chain;
+
+                IF v_next_block_number = 1 THEN
+                    v_previous_pod_hash := NULL;
+                ELSE
+                    SELECT pod_hash
+                    INTO v_previous_pod_hash
+                    FROM public.pod_chain
+                    WHERE block_number = v_next_block_number - 1
+                    LIMIT 1;
+                END IF;
+
+                INSERT INTO public.pod_chain (
+                    decision_id, decided_at, block_number, previous_pod_hash, triplet_hash,
+                    triplet_signature, timestamp_token, governance_outcome, anchored, anchor_tx, merkle_root
+                )
+                VALUES (
+                    p_decision_id, p_decided_at, v_next_block_number, v_previous_pod_hash, p_triplet_hash,
+                    p_triplet_signature, p_timestamp_token, p_governance_outcome, p_anchored, p_anchor_tx, p_merkle_root
+                )
+                RETURNING *
+                INTO v_row;
+
+                RETURN v_row;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_verify_pod_chain()
+             RETURNS TABLE(block_number bigint, pod_hash text, expected_pod_hash text,
+                           previous_pod_hash text, expected_previous_hash text, status text)
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            BEGIN
+                RETURN QUERY
+                WITH ordered AS (
+                    SELECT
+                        pc.*,
+                        LAG(pc.pod_hash) OVER (ORDER BY pc.block_number) AS expected_previous_hash
+                    FROM public.pod_chain pc
+                )
+                SELECT
+                    o.block_number,
+                    o.pod_hash,
+                    public.cgc_compute_pod_hash(
+                        o.block_number, o.decision_id, o.decided_at, o.previous_pod_hash,
+                        o.triplet_hash, o.governance_outcome, o.anchor_tx, o.created_at, o.hash_material_version
+                    ) AS expected_pod_hash,
+                    o.previous_pod_hash,
+                    o.expected_previous_hash,
+                    CASE
+                        WHEN o.block_number = 1
+                             AND o.previous_pod_hash IS NOT NULL
+                            THEN 'INVALID_GENESIS_PREVIOUS_HASH'
+                        WHEN o.block_number > 1
+                             AND o.previous_pod_hash IS DISTINCT FROM o.expected_previous_hash
+                            THEN 'INVALID_PREVIOUS_LINK'
+                        WHEN o.pod_hash IS DISTINCT FROM public.cgc_compute_pod_hash(
+                                o.block_number, o.decision_id, o.decided_at, o.previous_pod_hash,
+                                o.triplet_hash, o.governance_outcome, o.anchor_tx, o.created_at, o.hash_material_version
+                             )
+                            THEN 'INVALID_POD_HASH'
+                        ELSE 'OK'
+                    END AS status
+                FROM ordered o
+                ORDER BY o.block_number;
+            END;
+            $function$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION public.cgc_ensure_partition(target_date timestamp with time zone)
+             RETURNS text
+             LANGUAGE plpgsql
+             SET search_path TO 'public', 'extensions', 'pg_temp'
+            AS $function$
+            DECLARE
+                partition_name TEXT;
+                start_date     DATE;
+                end_date       DATE;
+                sql_stmt       TEXT;
+            BEGIN
+                start_date     := DATE_TRUNC('month', target_date)::DATE;
+                end_date       := (start_date + INTERVAL '1 month')::DATE;
+                partition_name := 'decisions_' || TO_CHAR(start_date, 'YYYY_MM');
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relname = partition_name
+                      AND n.nspname = 'public'
+                ) THEN
+                    sql_stmt := FORMAT(
+                        'CREATE TABLE IF NOT EXISTS %I
+                         PARTITION OF decisions
+                         FOR VALUES FROM (%L) TO (%L)',
+                        partition_name,
+                        start_date::TEXT,
+                        end_date::TEXT
+                    );
+                    EXECUTE sql_stmt;
+
+                    EXECUTE FORMAT(
+                        'CREATE UNIQUE INDEX IF NOT EXISTS %I ON %I (pod_hash)
+                         WHERE pod_hash IS NOT NULL',
+                        'idx_' || partition_name || '_pod_hash',
+                        partition_name
+                    );
+
+                    EXECUTE FORMAT(
+                        'CREATE TRIGGER trg_pod_hash_unique_%s
+                         BEFORE INSERT OR UPDATE ON %I
+                         FOR EACH ROW EXECUTE FUNCTION cgc_check_pod_hash_unique()',
+                        partition_name, partition_name
+                    );
+
+                    RETURN 'CREATED: ' || partition_name;
+                END IF;
+
+                RETURN 'EXISTS: ' || partition_name;
+            END;
+            $function$
+            """,
+        ]
+
+        # Each statement applied in its own transaction, independently --
+        # found live (2026-09-14) that a single connection/transaction for
+        # all 12 doesn't work here: cgc_append_pod_block declares
+        # RETURNS pod_chain (the table's composite row type), which
+        # Postgres DOES validate at CREATE FUNCTION time (unlike the
+        # plpgsql body's internal SELECT/INSERT statements, only checked
+        # at actual execution) -- so in an environment missing that table,
+        # the whole batch aborted, including 10 other functions that don't
+        # need it at all. One transaction per function means a missing
+        # dependency only skips the functions that genuinely need it.
+        applied, skipped = 0, 0
+        for stmt in functions:
+            try:
+                with self.get_connection() as conn:
+                    conn.cursor().execute(stmt)
+                    conn.commit()
+                    applied += 1
+            except Exception as e:
+                skipped += 1
+                logger.warning(f"Legacy pod_chain function statement skipped (non-fatal): {e}")
+        logger.info(f"Legacy pod_chain function hardening: {applied} applied, {skipped} skipped")
+
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)
     # ======================================================================

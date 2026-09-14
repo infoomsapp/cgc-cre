@@ -58,6 +58,7 @@ def main() -> None:
         ("_create_tenant_weighting_overrides_schema", db._create_tenant_weighting_overrides_schema),
         ("_create_saml_connections_schema", db._create_saml_connections_schema),
         ("_lock_down_public_schema_grants", db._lock_down_public_schema_grants),
+        ("_harden_legacy_pod_chain_functions", db._harden_legacy_pod_chain_functions),
     ]
 
     for name, step in steps:
