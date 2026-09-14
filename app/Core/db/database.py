@@ -1577,6 +1577,84 @@ class Database:
         except Exception as e:
             logger.error(f"RLS policy setup failed (non-fatal, tables remain accessible only via the postgres role): {e}")
 
+    def _lock_down_public_schema_grants(self):
+        """
+        2026-09-14: every table this method touches was created with
+        Supabase's default grants intact -- full SELECT/INSERT/UPDATE/
+        DELETE/TRUNCATE to the `anon` and `authenticated` PostgREST roles,
+        RLS enabled but with zero policies (so, today, blocked only by
+        RLS's own default-deny -- an accident of omission, not something
+        this codebase ever asked for or relies on). This app talks to
+        Postgres directly via psycopg2 (the `postgres` admin role, which
+        has rolbypassrls=true and so is unaffected by anything below);
+        it never uses Supabase's PostgREST/anon-key path, so these grants
+        serve no purpose and are pure exposure -- worse, they're a trap:
+        the moment ANY policy ever gets added to one of these tables for
+        a legitimate reason, `anon`/`authenticated` would immediately gain
+        real access to it, since they already hold the grants needed.
+
+        First found and fixed for 6 tables live only, no code (see commit
+        838a6e0) -- meaning a fresh environment bootstrapped from this
+        script alone would NOT have gotten that fix, only the live
+        database that received it by hand did. A second advisor sweep the
+        same day found 16 more tables and 2 SECURITY DEFINER views with
+        the identical unfixed pattern. This method closes both gaps at
+        once: it's the durable, idempotent version of both live fixes
+        combined, covering every table found across both passes, so
+        re-running this script (or bootstrapping a new environment) always
+        reproduces the same locked-down state instead of depending on
+        someone remembering to repeat a one-off live fix.
+
+        Deliberately NOT applied to cgc_pod.*/cgc_guard.*/cgc_tco.* (already
+        covered by _create_rls_policies' real cgc_app-scoped tenant
+        policies) or to `decisions` and its partitions (revoked here too,
+        but partitioned tables inherit RLS policy evaluation from the
+        parent -- explicit per-partition policies would be redundant, the
+        REVOKE alone already fully blocks anon/authenticated regardless of
+        policy state, checked before RLS is ever consulted).
+        """
+        if not self.use_postgres:
+            return
+
+        tables = [
+            "cgc_audit_traces", "cgc_calibration_changelog", "cgc_error_reports", "cgc_feedback",
+            "cgc_launch_checklist_items", "cgc_launch_errors", "cgc_launch_snapshot", "cgc_loop_decisions",
+            "cgc_module_results", "cgc_prefilter_results", "cgc_saml_connections", "cgc_tenant_webhooks",
+            "cgc_tenant_weighting_overrides", "cgc_webhook_retry_queue",
+            "decision_modules", "decisions_2026_04", "decisions_2026_05", "decisions_2026_06",
+            "pod_chain", "prefilter_results", "retention_log", "sessions", "tenants", "users",
+        ]
+        views = ["v_decision_summary", "v_forensic_audit"]
+        extra_revoke_only = ["decisions"]  # partitioned parent -- see docstring
+
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                existing = set()
+                cur.execute("""
+                    SELECT relname FROM pg_class
+                    WHERE relnamespace = 'public'::regnamespace
+                      AND relname = ANY(%s)
+                """, (tables + views + extra_revoke_only,))
+                existing = {row["relname"] if isinstance(row, dict) else row[0] for row in cur.fetchall()}
+
+                for name in tables + views + extra_revoke_only:
+                    if name not in existing:
+                        continue  # table/view genuinely doesn't exist in this environment -- skip, not an error
+                    cur.execute(f'REVOKE ALL PRIVILEGES ON public."{name}" FROM anon, authenticated')
+
+                for name in tables:
+                    if name not in existing:
+                        continue
+                    cur.execute(f'ALTER TABLE public."{name}" ENABLE ROW LEVEL SECURITY')
+                    cur.execute(f'DROP POLICY IF EXISTS deny_all ON public."{name}"')
+                    cur.execute(f'CREATE POLICY deny_all ON public."{name}" USING (false) WITH CHECK (false)')
+
+                conn.commit()
+                logger.info("Public schema anon/authenticated grants locked down")
+        except Exception as e:
+            logger.error(f"Public schema grant lockdown failed (non-fatal): {e}")
+
     # ======================================================================
     # IDENTITY & ACCESS (para AuthSystem)
     # ======================================================================
