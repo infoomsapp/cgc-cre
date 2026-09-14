@@ -123,14 +123,20 @@ verified by tests that connect *as* the RLS-restricted role specifically
 (not the bypass-RLS admin role) — genuine defense in depth, not just
 "the application code remembers to filter."
 
-**7.2 — Application-code-enforced only (weaker)**: `cgc_tco.audit_trail` —
-**the actual decision history you'd query as an integrating company** — is
-scoped only by a `WHERE app_source = %s` filter in Python, executed over an
-unrestricted admin database connection. There's no database-level backstop
-if that filter is ever omitted in a future code change. This is the single
-place where "is my data isolated from other tenants" has a real, not
-theoretical, answer of "yes, today, because the code is careful — not
-because the database won't let it happen otherwise."
+**7.2 — Application-code-enforced only (weaker), confirmed 2026-09-14**:
+`cgc_tco.audit_trail` — **the actual decision history you'd query as an
+integrating company** — is scoped only by a `WHERE app_source = %s` filter
+in Python, executed over an unrestricted admin database connection. There's
+no database-level backstop if that filter is ever omitted in a future code
+change. A live-DB check confirmed this is the right call, not just the
+current state: a leftover `tenant_id`-based RLS policy on this table was
+found and dropped after verifying `tenant_id` doesn't actually correspond
+to a real per-tenant identifier for at least one app (`ledgiproof`'s rows
+carry ad-hoc testing strings in that column, not a consistent tenant ID) —
+so DB-level RLS here wouldn't have isolated data correctly even if it had
+been active. This is the one place where "is my data isolated from other
+tenants" has a real, not theoretical, answer of "yes, today, because the
+code is careful — not because the database won't let it happen otherwise."
 
 **7.3 — Credential-level binding**: your API key is cryptographically tied
 to your `app_source` at issuance (fixed after a real historical bug where a
