@@ -2623,6 +2623,148 @@ class Database:
                         return
 
     # ======================================================================
+    # TENANT WEIGHTING OVERRIDES (2026-09-14 -- closes a disclosed roadmap
+    # gap: the decision-scoring weight matrix used to be readable via
+    # GET /governance/scoring-methodology but only ever changeable by
+    # editing app/modules/loop/cgc_loop.py's DECISION_WEIGHTING_MATRIX and
+    # redeploying -- no per-tenant customization was possible via API.)
+    # ======================================================================
+    # One row per (app_source, area, sensitivity_level) -- an override for
+    # that specific cell of the matrix. CGCLoopOrchestrator._get_weighting_config()
+    # checks here FIRST, falling back to the hardcoded DECISION_WEIGHTING_MATRIX
+    # (same override-then-fallback convention as CGCDBLoader's _FALLBACK_*
+    # dicts elsewhere in this codebase) when no override row exists. A
+    # tenant with no overrides at all behaves EXACTLY as before this
+    # feature existed.
+
+    def _create_tenant_weighting_overrides_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_tenant_weighting_overrides (
+                        id                           BIGSERIAL PRIMARY KEY,
+                        app_source                   VARCHAR(50) NOT NULL,
+                        area                         VARCHAR(50) NOT NULL,
+                        sensitivity_level             VARCHAR(20) NOT NULL,
+                        ecm_weight                   NUMERIC(4,3) NOT NULL,
+                        pfm_weight                   NUMERIC(4,3) NOT NULL,
+                        pan_weight                   NUMERIC(4,3) NOT NULL,
+                        sda_weight                   NUMERIC(4,3) NOT NULL,
+                        approval_threshold           NUMERIC(4,3) NOT NULL,
+                        critical_framework_enforcement BOOLEAN NOT NULL DEFAULT FALSE,
+                        require_human_review         BOOLEAN NOT NULL DEFAULT FALSE,
+                        updated_by                   VARCHAR(255),
+                        created_at                   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at                   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        UNIQUE (app_source, area, sensitivity_level)
+                    )
+                """)
+                logger.info("Tenant weighting overrides schema ready")
+        except Exception as e:
+            logger.warning(f"_create_tenant_weighting_overrides_schema failed (non-fatal): {e}")
+
+    def get_weighting_override(self, app_source: str, area: str, sensitivity_level: str) -> Optional[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT * FROM cgc_tenant_weighting_overrides
+                        WHERE app_source = %s AND area = %s AND sensitivity_level = %s
+                    """, (app_source, area, sensitivity_level))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            for r in self._read_json_list('tenant_weighting_overrides.json'):
+                if r.get('app_source') == app_source and r.get('area') == area and r.get('sensitivity_level') == sensitivity_level:
+                    return r
+            return None
+
+    def list_weighting_overrides(self, app_source: str) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT * FROM cgc_tenant_weighting_overrides
+                        WHERE app_source = %s ORDER BY area, sensitivity_level
+                    """, (app_source,))
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            rows = [r for r in self._read_json_list('tenant_weighting_overrides.json') if r.get('app_source') == app_source]
+            rows.sort(key=lambda r: (r.get('area', ''), r.get('sensitivity_level', '')))
+            return rows
+
+    def set_weighting_override(self, app_source: str, area: str, sensitivity_level: str, weights: Dict[str, Any], updated_by: Optional[str]) -> Dict[str, Any]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_tenant_weighting_overrides
+                            (app_source, area, sensitivity_level, ecm_weight, pfm_weight,
+                             pan_weight, sda_weight, approval_threshold,
+                             critical_framework_enforcement, require_human_review, updated_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (app_source, area, sensitivity_level) DO UPDATE SET
+                            ecm_weight = EXCLUDED.ecm_weight, pfm_weight = EXCLUDED.pfm_weight,
+                            pan_weight = EXCLUDED.pan_weight, sda_weight = EXCLUDED.sda_weight,
+                            approval_threshold = EXCLUDED.approval_threshold,
+                            critical_framework_enforcement = EXCLUDED.critical_framework_enforcement,
+                            require_human_review = EXCLUDED.require_human_review,
+                            updated_by = EXCLUDED.updated_by, updated_at = NOW()
+                        RETURNING *
+                    """, (
+                        app_source, area, sensitivity_level,
+                        weights['ecm_weight'], weights['pfm_weight'], weights['pan_weight'], weights['sda_weight'],
+                        weights['approval_threshold'], weights.get('critical_framework_enforcement', False),
+                        weights.get('require_human_review', False), updated_by,
+                    ))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                rows = self._read_json_list('tenant_weighting_overrides.json')
+                now = datetime.now(timezone.utc).isoformat()
+                new_row = {
+                    'app_source': app_source, 'area': area, 'sensitivity_level': sensitivity_level,
+                    'ecm_weight': weights['ecm_weight'], 'pfm_weight': weights['pfm_weight'],
+                    'pan_weight': weights['pan_weight'], 'sda_weight': weights['sda_weight'],
+                    'approval_threshold': weights['approval_threshold'],
+                    'critical_framework_enforcement': weights.get('critical_framework_enforcement', False),
+                    'require_human_review': weights.get('require_human_review', False),
+                    'updated_by': updated_by, 'updated_at': now,
+                }
+                for i, r in enumerate(rows):
+                    if r.get('app_source') == app_source and r.get('area') == area and r.get('sensitivity_level') == sensitivity_level:
+                        new_row['created_at'] = r.get('created_at', now)
+                        rows[i] = new_row
+                        self._write_json_list('tenant_weighting_overrides.json', rows)
+                        return new_row
+                new_row['created_at'] = now
+                rows.append(new_row)
+                self._write_json_list('tenant_weighting_overrides.json', rows)
+                return new_row
+
+    def delete_weighting_override(self, app_source: str, area: str, sensitivity_level: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        DELETE FROM cgc_tenant_weighting_overrides
+                        WHERE app_source = %s AND area = %s AND sensitivity_level = %s
+                    """, (app_source, area, sensitivity_level))
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                rows = self._read_json_list('tenant_weighting_overrides.json')
+                remaining = [r for r in rows if not (r.get('app_source') == app_source and r.get('area') == area and r.get('sensitivity_level') == sensitivity_level)]
+                found = len(remaining) != len(rows)
+                if found:
+                    self._write_json_list('tenant_weighting_overrides.json', remaining)
+                return found
+
+    # ======================================================================
     # CALIBRATION CHANGELOG (versioned history for PAN/ECM/PFM/SDA scoring rules)
     # ======================================================================
     # CGC Core's four scoring modules (PAN/ECM/PFM/SDA) read their governance

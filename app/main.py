@@ -938,6 +938,78 @@ async def delete_my_webhook(app_source: str, user=Depends(get_current_user)) -> 
     return {"deleted": deleted}
 
 
+# Per-tenant decision-weighting overrides (2026-09-14 -- closes a disclosed
+# roadmap gap: the matrix used to only be readable via
+# GET /governance/scoring-methodology, changeable only by editing
+# DECISION_WEIGHTING_MATRIX in cgc_loop.py and redeploying). Same
+# ownership-check posture as the webhook endpoints above -- self-service,
+# scoped to app_sources the caller actually owns.
+_VALID_SENSITIVITY_LEVELS = {"LOW", "MEDIUM", "HIGH"}
+
+
+class WeightingOverrideIn(BaseModel):
+    ecm_weight: float
+    pfm_weight: float
+    pan_weight: float
+    sda_weight: float
+    approval_threshold: float
+    critical_framework_enforcement: bool = False
+    require_human_review: bool = False
+
+
+def _validate_weighting_override(payload: "WeightingOverrideIn") -> None:
+    for name in ("ecm_weight", "pfm_weight", "pan_weight", "sda_weight", "approval_threshold"):
+        value = getattr(payload, name)
+        if not (0.0 <= value <= 1.0):
+            raise HTTPException(status_code=400, detail=f"{name} must be between 0.0 and 1.0")
+    total = payload.ecm_weight + payload.pfm_weight + payload.pan_weight + payload.sda_weight
+    # ecm/pfm/pan/sda are meant to be a weighted average (see
+    # _aggregate_scores in cgc_loop.py) -- letting them drift far from 1.0
+    # silently changes the effective scale of the approval_threshold
+    # comparison, not just the mix between modules.
+    if abs(total - 1.0) > 0.02:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ecm_weight + pfm_weight + pan_weight + sda_weight must sum to ~1.0 (got {total:.3f})",
+        )
+
+
+@app.get("/tenants/my-apps/{app_source}/weighting", tags=["Admin"])
+async def list_my_weighting_overrides(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    return {"overrides": app.db.list_weighting_overrides(app_source)}
+
+
+@app.put("/tenants/my-apps/{app_source}/weighting/{area}/{sensitivity_level}", tags=["Admin"])
+async def set_my_weighting_override(
+    app_source: str, area: str, sensitivity_level: str,
+    payload: WeightingOverrideIn, user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    sensitivity_level = sensitivity_level.upper()
+    if sensitivity_level not in _VALID_SENSITIVITY_LEVELS:
+        raise HTTPException(status_code=400, detail=f"sensitivity_level must be one of {sorted(_VALID_SENSITIVITY_LEVELS)}")
+    _validate_weighting_override(payload)
+
+    row = app.db.set_weighting_override(
+        app_source, area.upper(), sensitivity_level, payload.model_dump(), updated_by=user["email"],
+    )
+    logger.info(f"[weighting] override set: app_source={app_source} area={area} sensitivity={sensitivity_level} by={user['email']}")
+    return row
+
+
+@app.delete("/tenants/my-apps/{app_source}/weighting/{area}/{sensitivity_level}", tags=["Admin"])
+async def delete_my_weighting_override(
+    app_source: str, area: str, sensitivity_level: str, user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    deleted = app.db.delete_weighting_override(app_source, area.upper(), sensitivity_level.upper())
+    return {"deleted": deleted}
+
+
 async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any]) -> None:
     """
     Best-effort outbound notification, synchronous with a strict timeout.
@@ -947,11 +1019,11 @@ async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any])
     fire-and-forget task here could silently never execute. Awaiting with
     a short timeout inside the request is the honest tradeoff -- adds a
     little latency to /governance/decision, but the delivery genuinely
-    happens (or genuinely times out) rather than maybe-happening. No
-    retry queue exists yet -- a failed delivery is logged and recorded on
-    the webhook row, not retried. Never raises: a broken or slow customer
-    endpoint must never break or delay the governance decision itself
-    beyond the timeout.
+    happens (or genuinely times out) rather than maybe-happening. A failed
+    delivery is queued for retry (see enqueue_webhook_retry below and
+    POST /admin/webhooks/process-retries) rather than just logged and
+    lost. Never raises: a broken or slow customer endpoint must never
+    break or delay the governance decision itself beyond the timeout.
     """
     hook = app.db.get_webhook(app_source)
     if not hook or not hook.get("active"):

@@ -325,8 +325,12 @@ class LOOP:
             logger.warning(f"ComplianceEngine initialization failed: {e}")
             self.compliance = None
         
-        # Weighting matrix
+        # Weighting matrix -- DECISION_WEIGHTING_MATRIX is the hardcoded
+        # default; self._db backs per-tenant overrides (see
+        # _get_weighting_config below and Database.get_weighting_override).
         self.weighting_matrix = DECISION_WEIGHTING_MATRIX
+        from app.Core.db.database import get_database
+        self._db = get_database()
         
         # Metrics
         self.total_decisions = 0
@@ -533,7 +537,7 @@ class LOOP:
             # ================================================================
             # STEP 5: Get Dynamic Weighting Config
             # ================================================================
-            weighting_config = self._get_weighting_config(area, sensitivity_level)
+            weighting_config = self._get_weighting_config(area, sensitivity_level, app_source=app_source)
             
             logger.info(
                 f"[Loop] Weighting config loaded | Threshold: {weighting_config.approval_threshold} | "
@@ -789,11 +793,37 @@ class LOOP:
         else:
             return "HIGH" if sensitive_count >= 4 else ("MEDIUM" if sensitive_count >= 2 else "LOW")
 
-    def _get_weighting_config(self, area: str, sensitivity_level: str) -> WeightingConfig:
-        """Retrieve dynamic weighting configuration for area + sensitivity."""
+    def _get_weighting_config(self, area: str, sensitivity_level: str, app_source: Optional[str] = None) -> WeightingConfig:
+        """Retrieve dynamic weighting configuration for area + sensitivity.
+
+        Checks for a per-tenant override first (2026-09-14, closes a
+        disclosed roadmap gap -- the matrix used to only be changeable by
+        editing DECISION_WEIGHTING_MATRIX and redeploying). No override for
+        this (app_source, area, sensitivity_level) -- the overwhelming
+        majority of calls, including every one before this feature existed
+        -- falls straight through to the hardcoded matrix, unchanged
+        behavior."""
+        override = None
+        if app_source and self._db:
+            try:
+                override = self._db.get_weighting_override(app_source, area, sensitivity_level)
+            except Exception as e:
+                logger.warning(f"[Loop] weighting override lookup failed (non-fatal, using hardcoded matrix): {e}")
+
+        if override:
+            return WeightingConfig(
+                ecm_weight=float(override.get("ecm_weight", 0.5)),
+                pfm_weight=float(override.get("pfm_weight", 0.35)),
+                pan_weight=float(override.get("pan_weight", 0.10)),
+                sda_weight=float(override.get("sda_weight", 0.05)),
+                approval_threshold=float(override.get("approval_threshold", 0.80)),
+                critical_framework_enforcement=bool(override.get("critical_framework_enforcement", False)),
+                require_human_review=bool(override.get("require_human_review", False)),
+            )
+
         area_weights = self.weighting_matrix.get(area, self.weighting_matrix["DEFAULT"])
         config_dict = area_weights.get(sensitivity_level, area_weights.get("MEDIUM", {}))
-        
+
         return WeightingConfig(
             ecm_weight=config_dict.get("ecm_weight", 0.5),
             pfm_weight=config_dict.get("pfm_weight", 0.35),

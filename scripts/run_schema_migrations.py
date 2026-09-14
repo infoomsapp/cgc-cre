@@ -55,6 +55,7 @@ def main() -> None:
         ("_create_calibration_changelog_schema", db._create_calibration_changelog_schema),
         ("_create_tenant_webhooks_schema", db._create_tenant_webhooks_schema),
         ("_create_webhook_retry_queue_schema", db._create_webhook_retry_queue_schema),
+        ("_create_tenant_weighting_overrides_schema", db._create_tenant_weighting_overrides_schema),
         ("_create_saml_connections_schema", db._create_saml_connections_schema),
     ]
 
