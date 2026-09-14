@@ -2013,6 +2013,33 @@ class Database:
                         UNIQUE (app_source, source)
                     )
                 """)
+                # cgc_launch_errors -- errors encountered DURING the launch/
+                # submission process itself (store rejection, build failure,
+                # signing/provisioning failure, etc.), not runtime crashes of
+                # the shipped app (that's a different, not-yet-built,
+                # general error-tracking concern -- deliberately out of
+                # scope here, see docs/INTEGRATION_GUIDE.md discussion).
+                # 'source' is a free-form origin tag (e.g. "app_store_review",
+                # "play_console", "ci_build", "manual") so new origins don't
+                # need a schema change.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_launch_errors (
+                        id           BIGSERIAL PRIMARY KEY,
+                        app_source   VARCHAR(50) NOT NULL,
+                        source       VARCHAR(50) NOT NULL,
+                        severity     VARCHAR(20) NOT NULL DEFAULT 'error',
+                        message      TEXT NOT NULL,
+                        detail       JSONB,
+                        status       VARCHAR(20) NOT NULL DEFAULT 'open',
+                        resolved_by  VARCHAR(255),
+                        resolved_at  TIMESTAMP WITH TIME ZONE,
+                        created_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_launch_errors_app_source_status
+                        ON cgc_launch_errors (app_source, status)
+                """)
                 logger.info("Launch readiness schema ready")
         except Exception as e:
             logger.warning(f"_create_launch_readiness_schema failed (non-fatal): {e}")
@@ -2149,6 +2176,90 @@ class Database:
         else:
             snapshots = self._read_json_list('launch_snapshot.json')
             return [r for r in snapshots if r.get('app_source') == app_source]
+
+    def save_launch_error(self, error: Dict[str, Any]) -> Dict[str, Any]:
+        """Log one launch/submission-process error. Always an insert --
+        errors are an append-only log, never edited in place (only resolved,
+        see resolve_launch_error)."""
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_launch_errors
+                            (app_source, source, severity, message, detail, status)
+                        VALUES (%s, %s, %s, %s, %s, 'open')
+                        RETURNING *
+                    """, (
+                        error.get('app_source'), error.get('source'), error.get('severity', 'error'),
+                        error.get('message'), Json(error.get('detail')) if error.get('detail') is not None else None,
+                    ))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                errors = self._read_json_list('launch_errors.json')
+                now = datetime.now(timezone.utc).isoformat()
+                new_row = {
+                    'id': int(time.time() * 1000),
+                    'app_source': error.get('app_source'), 'source': error.get('source'),
+                    'severity': error.get('severity', 'error'), 'message': error.get('message'),
+                    'detail': error.get('detail'), 'status': 'open',
+                    'resolved_by': None, 'resolved_at': None, 'created_at': now,
+                }
+                errors.append(new_row)
+                self._write_json_list('launch_errors.json', errors)
+                return new_row
+
+    def list_launch_errors(self, app_source: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if status:
+                        cur.execute("""
+                            SELECT * FROM cgc_launch_errors
+                            WHERE app_source = %s AND status = %s
+                            ORDER BY created_at DESC
+                        """, (app_source, status))
+                    else:
+                        cur.execute("""
+                            SELECT * FROM cgc_launch_errors
+                            WHERE app_source = %s
+                            ORDER BY created_at DESC
+                        """, (app_source,))
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            errors = self._read_json_list('launch_errors.json')
+            errors = [r for r in errors if r.get('app_source') == app_source]
+            if status:
+                errors = [r for r in errors if r.get('status') == status]
+            errors.sort(key=lambda r: r.get('created_at', ''), reverse=True)
+            return errors
+
+    def resolve_launch_error(self, error_id: int, app_source: str, resolved_by: Optional[str]) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE cgc_launch_errors
+                        SET status = 'resolved', resolved_by = %s, resolved_at = NOW()
+                        WHERE id = %s AND app_source = %s AND status = 'open'
+                    """, (resolved_by, error_id, app_source))
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                errors = self._read_json_list('launch_errors.json')
+                now = datetime.now(timezone.utc).isoformat()
+                found = False
+                for r in errors:
+                    if r.get('id') == error_id and r.get('app_source') == app_source and r.get('status') == 'open':
+                        r['status'] = 'resolved'
+                        r['resolved_by'] = resolved_by
+                        r['resolved_at'] = now
+                        found = True
+                        break
+                if found:
+                    self._write_json_list('launch_errors.json', errors)
+                return found
 
     # ======================================================================
     # SAML CONNECTIONS (enterprise SSO, one Identity Provider per customer domain)

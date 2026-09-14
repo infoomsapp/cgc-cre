@@ -1138,8 +1138,9 @@ async def security_headers(request: Request, call_next: Any) -> Any:
 # =========================
 @app.get("/health", tags=["System"])
 async def health() -> Dict[str, Any]:
-    """Liveness probe for Railway (railway.toml healthcheckPath = "/health").
-    No auth, no DB dependency — just confirms the process is up and serving,
+    """Liveness probe. Railway was retired 2026-08-19 -- Vercel is the only
+    real deploy target now, but any uptime monitor can still hit this path.
+    No auth, no DB dependency -- just confirms the process is up and serving,
     which is all a deploy healthcheck should require."""
     return {"status": "ok", "version": "2.2.2"}
 

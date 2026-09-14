@@ -4,6 +4,9 @@ GET    /launch-readiness/{app_source}/checklist           -- list manual items
 POST   /launch-readiness/{app_source}/checklist           -- create/update a manual item
 DELETE /launch-readiness/{app_source}/checklist/{item_id} -- remove a manual item
 POST   /launch-readiness/{app_source}/refresh              -- re-pull automated signals
+POST   /launch-readiness/{app_source}/errors               -- log a launch-process error
+GET    /launch-readiness/{app_source}/errors               -- list launch-process errors
+POST   /launch-readiness/{app_source}/errors/{id}/resolve  -- mark one resolved
 
 Launch-readiness tracking for Play Store / App Store submission, scoped
 per app_source. Three signal sources roll into one view:
@@ -17,6 +20,22 @@ per app_source. Three signal sources roll into one view:
      advisors, pulled directly from Supabase's Management API on
      refresh (needs SUPABASE_MANAGEMENT_PAT -- a Management API personal
      access token, NOT the project's anon/service-role key).
+
+A fourth, separate concept -- launch-process ERRORS (store rejections,
+build failures, signing/provisioning failures) -- is tracked alongside
+the three readiness signals above, not folded into them: an "error" isn't
+a readiness *signal* (it doesn't represent current state you'd refresh
+and overwrite), it's an append-only event log you triage over time. Report
+one with POST .../errors (from CI, a manual entry after an App Store
+rejection email, etc.), list/filter with GET .../errors, and mark
+resolved with POST .../errors/{id}/resolve. Open-error counts roll into
+the summary endpoint the same way checklist counts do.
+
+Deliberately OUT of scope here: general runtime error tracking for the
+shipped app (crashes/exceptions after launch, i.e. a Sentry-equivalent).
+This is specifically errors from the LAUNCH/SUBMISSION process itself --
+see docs/INTEGRATION_GUIDE.md if a broader always-on error-tracking
+service is wanted later, that's a different, larger design question.
 
 Auth: same Bearer-token scheme as the rest of the API, applied at the
 router-mount level in main.py (dependencies=[Depends(get_current_user)]),
@@ -80,6 +99,18 @@ class ChecklistItemIn(BaseModel):
     note: Optional[str] = None
 
 
+_VALID_SEVERITIES = {"error", "warning", "info"}
+
+
+class LaunchErrorIn(BaseModel):
+    model_config = ConfigDict(str_max_length=4000)
+
+    source: str
+    severity: str = "error"
+    message: str
+    detail: Optional[Dict[str, Any]] = None
+
+
 @router.get("/{app_source}/summary", summary="Aggregate launch-readiness view")
 async def get_summary(app_source: str) -> Dict[str, Any]:
     _require_valid_app_source(app_source)
@@ -92,11 +123,14 @@ async def get_summary(app_source: str) -> Dict[str, Any]:
         status = it.get("status", "pending")
         counts[status] = counts.get(status, 0) + 1
 
+    open_errors = db.list_launch_errors(app_source, status="open")
+
     return {
         "app_source": app_source,
         "checklist_counts": counts,
         "checklist_total": len(items),
         "snapshots": snapshots,
+        "open_error_count": len(open_errors),
     }
 
 
@@ -150,6 +184,57 @@ async def delete_checklist_item(app_source: str, item_id: int) -> Dict[str, Any]
     if not ok:
         raise HTTPException(status_code=404, detail="No checklist item with that id for this app_source")
     return {"deleted": True, "id": item_id}
+
+
+@router.post("/{app_source}/errors", summary="Log a launch/submission-process error")
+async def report_launch_error(
+    app_source: str, payload: LaunchErrorIn, request: Request
+) -> Dict[str, Any]:
+    _require_valid_app_source(app_source)
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(f"launch_readiness:write:{client_ip}", _RATE_LIMIT, _RATE_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many requests -- slow down")
+
+    if payload.severity not in _VALID_SEVERITIES:
+        raise HTTPException(status_code=400, detail=f"severity must be one of {sorted(_VALID_SEVERITIES)}")
+
+    db = get_database()
+    row = db.save_launch_error({
+        "app_source": app_source,
+        "source": payload.source,
+        "severity": payload.severity,
+        "message": payload.message,
+        "detail": payload.detail,
+    })
+    return row
+
+
+@router.get("/{app_source}/errors", summary="List launch/submission-process errors")
+async def list_launch_errors(app_source: str, status: Optional[str] = None) -> Dict[str, Any]:
+    _require_valid_app_source(app_source)
+    if status is not None and status not in {"open", "resolved"}:
+        raise HTTPException(status_code=400, detail="status must be 'open' or 'resolved'")
+    db = get_database()
+    return {"errors": db.list_launch_errors(app_source, status=status)}
+
+
+@router.post("/{app_source}/errors/{error_id}/resolve", summary="Mark one launch error resolved")
+async def resolve_launch_error(app_source: str, error_id: int, request: Request) -> Dict[str, Any]:
+    _require_valid_app_source(app_source)
+
+    resolved_by = None
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else auth_header
+    principal = request.app.auth.verify_token(token) if (token and request.app.auth) else None
+    if principal:
+        resolved_by = principal.get("email")
+
+    db = get_database()
+    ok = db.resolve_launch_error(error_id, app_source, resolved_by)
+    if not ok:
+        raise HTTPException(status_code=404, detail="No open error with that id for this app_source")
+    return {"resolved": True, "id": error_id}
 
 
 @router.post("/{app_source}/refresh", summary="Re-pull automated signals (repo manifest + Supabase advisors)")
