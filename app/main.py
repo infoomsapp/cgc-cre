@@ -80,6 +80,7 @@ from api.v1.endpoints.saml_sso import router as saml_sso_router
 from app.modules.guard.rate_limiter import check_rate_limit
 from app.modules.guard.payload_guard import scan_payload, record_suspicious_payload
 from app.modules.guard.enforcement import is_hard_mode as is_guard_hard_mode
+from app.modules.guard.webhook_url_guard import validate_webhook_url, is_still_safe_to_deliver
 
 # Internal guard router (Phase 3 of the reinforcement plan) — read-only
 # misuse-detection report over the TCO ledger.
@@ -576,21 +577,28 @@ async def process_webhook_retries(user=Depends(require_admin_or_service)) -> Dic
         )
         signature = hmac.new(hook["secret"].encode(), body.encode(), hashlib.sha256).hexdigest()
 
+        # SSRF re-check (2026-09-14) -- same reasoning as _deliver_webhook's
+        # own re-check: DNS can change between when this retry was queued
+        # and now, so re-resolve immediately before connecting on every
+        # attempt, not just the first.
         success, error = False, None
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    hook["url"], data=body,
-                    headers={"Content-Type": "application/json", "X-CGC-Signature": f"sha256={signature}"},
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    success = 200 <= resp.status < 300
-                    if not success:
-                        error = f"http_{resp.status}"
-        except asyncio.TimeoutError:
-            error = "timeout"
-        except Exception as e:
-            error = str(e)[:200]
+        if not await is_still_safe_to_deliver(hook["url"], asyncio.get_event_loop()):
+            error = "url_unsafe"
+        else:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        hook["url"], data=body,
+                        headers={"Content-Type": "application/json", "X-CGC-Signature": f"sha256={signature}"},
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as resp:
+                        success = 200 <= resp.status < 300
+                        if not success:
+                            error = f"http_{resp.status}"
+            except asyncio.TimeoutError:
+                error = "timeout"
+            except Exception as e:
+                error = str(e)[:200]
 
         app.db.record_webhook_retry_attempt(retry["id"], success=success, error=error)
         if success:
@@ -933,8 +941,15 @@ async def get_my_webhook(app_source: str, user=Depends(get_current_user)) -> Dic
 async def set_my_webhook(app_source: str, payload: WebhookIn, user=Depends(get_current_user)) -> Dict[str, Any]:
     if not _owns_app_source(app_source, user["email"]):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
-    if not payload.url.startswith("https://"):
-        raise HTTPException(status_code=400, detail="Webhook URL must be https://")
+    # SSRF guard (2026-09-14): full DNS-resolution check against private/
+    # loopback/link-local/reserved ranges, not just an https:// prefix
+    # check -- see webhook_url_guard.py's own header for why. Blocking DNS
+    # lookup, run off the event loop.
+    url_ok, url_error = await asyncio.get_event_loop().run_in_executor(
+        None, validate_webhook_url, payload.url
+    )
+    if not url_ok:
+        raise HTTPException(status_code=400, detail=url_error)
 
     # 2026-09-14 audit follow-up: every other self-service config-write
     # endpoint (key regenerate, tenant self-signup) already has a per-account
@@ -1063,21 +1078,33 @@ async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any])
     body = json.dumps({"event": event, "app_source": app_source, "data": payload}, default=str, sort_keys=True)
     signature = hmac.new(hook["secret"].encode(), body.encode(), hashlib.sha256).hexdigest()
 
+    # SSRF re-check (2026-09-14): the URL passed validate_webhook_url() at
+    # registration, but DNS can change between then and now -- re-resolve
+    # immediately before connecting so a rebound domain can't turn a
+    # once-safe URL into a live SSRF primitive. Falls through to the same
+    # record-and-enqueue-retry path an HTTP failure would, rather than a
+    # special early return -- a URL that's unsafe now might resolve safely
+    # again by the next backoff step, and either way it should count
+    # against WEBHOOK_RETRY_MAX_ATTEMPTS like any other failure, not retry
+    # forever. See webhook_url_guard.py's header for the full reasoning.
     status = "error"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                hook["url"],
-                data=body,
-                headers={"Content-Type": "application/json", "X-CGC-Signature": f"sha256={signature}"},
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                status = f"http_{resp.status}"
-    except asyncio.TimeoutError:
-        status = "timeout"
-    except Exception as e:
-        status = f"error: {e}"[:200]
-        logger.warning(f"[webhook] delivery to {app_source} failed (non-fatal): {e}")
+    if not await is_still_safe_to_deliver(hook["url"], asyncio.get_event_loop()):
+        status = "error: url_unsafe"
+    else:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    hook["url"],
+                    data=body,
+                    headers={"Content-Type": "application/json", "X-CGC-Signature": f"sha256={signature}"},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    status = f"http_{resp.status}"
+        except asyncio.TimeoutError:
+            status = "timeout"
+        except Exception as e:
+            status = f"error: {e}"[:200]
+            logger.warning(f"[webhook] delivery to {app_source} failed (non-fatal): {e}")
 
     try:
         app.db.record_webhook_delivery(app_source, status)
