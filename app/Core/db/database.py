@@ -1009,7 +1009,8 @@ class Database:
                         BEGIN
                             RAISE EXCEPTION 'cgc_pod.pod_ledger is append-only: % not permitted', TG_OP;
                         END;
-                        $func$ LANGUAGE plpgsql;
+                        $func$ LANGUAGE plpgsql
+                        SET search_path = cgc_pod, public, pg_temp;
 
                         DROP TRIGGER IF EXISTS pod_ledger_append_only ON cgc_pod.pod_ledger;
                         CREATE TRIGGER pod_ledger_append_only
