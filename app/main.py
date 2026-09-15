@@ -308,6 +308,7 @@ async def run_cgc_prefilter(
     area: str = "DEFAULT",
     app_source: str = "unknown",
     agent_id: Optional[str] = None,
+    requested_scopes: Optional[List[str]] = None,
 ) -> Any:
     """Ejecutar CGC-PreFilter."""
 
@@ -486,7 +487,16 @@ async def run_cgc_prefilter(
         user_roles=user_roles,
         action=action,
         data_domains=data_domains,
-        requested_scopes=[],
+        # 2026-09-15: was hardcoded to [] unconditionally, which meant
+        # PreFilter's own scopes_exist (CHECK 4) was always vacuously true
+        # -- an agent's `scopes` field had nothing to ever be checked
+        # against, even for a real registered agent (see the agent_id
+        # branch above). Caller-supplied, defaulting to [] when omitted
+        # (every current integration): same "nothing requested, nothing to
+        # restrict" convention CHECK 4 and CHECK 4B already use for an
+        # empty list, so this is additive, not a behavior change for
+        # anyone not already passing requested_scopes.
+        requested_scopes=requested_scopes or [],
         area=area,
         correlation_id=f"corr_{secrets.token_hex(8)}"
     )
@@ -997,14 +1007,32 @@ def _key_age_days(created_at) -> Optional[int]:
         return None
 
 
-def _owns_app_source(app_source: str, email: str) -> bool:
-    """True if this account has ever issued a key for app_source (self-signup
-    or an earlier regenerate) -- the closest thing this schema has to an
-    'owner' column. Deliberately checks ALL keys, not just active ones: an
-    account that revoked its own key still owns the app_source and must be
-    able to regenerate a fresh one, not get locked out permanently."""
+def _owns_app_source(app_source: str, user: Dict[str, Any]) -> bool:
+    """True if this caller owns app_source, checked two ways:
+
+    1. A per-tenant API key's own cryptographically-bound app_source
+       (user["app_source"], set once at AuthSystem.generate_api_key time)
+       matches directly. 2026-09-15 fix (disclosed gap): verify_token()
+       gives an API-key principal a SYNTHETIC email
+       (f"apikey@{app_source}") that never matches any key's real
+       created_by, so before this check existed, every endpoint using
+       this helper (webhook/weighting-override/action-policy/kill-switch/
+       agent-registry self-service) was unusable by a per-tenant key --
+       only a session JWT from /auth/signin could manage them. A
+       session-JWT caller has no bound app_source (None), so this
+       branch is simply never true for them, falling through to #2
+       unchanged -- same behavior as before this fix for that caller type.
+    2. This account has ever issued a key for app_source (self-signup or
+       an earlier regenerate) -- the closest thing this schema has to an
+       'owner' column, matched by the real created_by email. Deliberately
+       checks ALL keys, not just active ones: an account that revoked its
+       own key still owns the app_source and must be able to regenerate a
+       fresh one, not get locked out permanently.
+    """
+    if user.get("app_source") == app_source:
+        return True
     return any(
-        k.get("created_by") == email
+        k.get("created_by") == user.get("email")
         for k in app.auth.list_api_keys(app_source)
     )
 
@@ -1021,7 +1049,7 @@ def _can_access_app_source(app_source: str, user: Dict[str, Any]) -> bool:
     first-party app_source (operator/admin access, unchanged), or an
     app_source this account actually owns (self-service tenant access,
     new)."""
-    return app_source in ALLOWED_APP_SOURCES or _owns_app_source(app_source, user.get("email", ""))
+    return app_source in ALLOWED_APP_SOURCES or _owns_app_source(app_source, user)
 
 
 @app.get("/tenants/my-apps", tags=["Admin"])
@@ -1072,7 +1100,7 @@ async def regenerate_my_key(app_source: str, user=Depends(get_current_user)) -> 
     the admin Tenants dashboard's 'Revoke' + 'Issue API key' pair, done
     atomically enough that the caller is never left with zero valid keys
     mid-rotation on the happy path."""
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
 
     if not check_rate_limit(f"tenant_key_regen:{user['email']}", 5, 3600):
@@ -1100,7 +1128,7 @@ async def create_my_billing_checkout_link(
     """Customer-scoped version of /admin/billing/checkout-link -- same
     Stripe logic, but ownership-checked instead of admin-only, so a
     self-signed-up tenant can upgrade off FREE without asking an admin."""
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if plan.upper() not in tenant_manager.PLAN_QUOTAS or plan.upper() == "FREE":
         raise HTTPException(status_code=400, detail=f"Not a checkout-eligible plan: {plan}")
@@ -1125,7 +1153,7 @@ async def create_my_billing_checkout_link(
 
 @app.get("/tenants/my-apps/{app_source}/billing/portal-link", tags=["Billing"])
 async def create_my_billing_portal_link(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     existing = app_billing_manager.get_billing(app_source)
     if not existing or not existing.get("stripe_customer_id"):
@@ -1155,7 +1183,7 @@ class WebhookIn(BaseModel):
 
 @app.get("/tenants/my-apps/{app_source}/webhook", tags=["Admin"])
 async def get_my_webhook(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     hook = app.db.get_webhook(app_source)
     if not hook:
@@ -1172,7 +1200,7 @@ async def get_my_webhook(app_source: str, user=Depends(get_current_user)) -> Dic
 
 @app.post("/tenants/my-apps/{app_source}/webhook", tags=["Admin"])
 async def set_my_webhook(app_source: str, payload: WebhookIn, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     # SSRF guard (2026-09-14): full DNS-resolution check against private/
     # loopback/link-local/reserved ranges, not just an https:// prefix
@@ -1205,7 +1233,7 @@ async def set_my_webhook(app_source: str, payload: WebhookIn, user=Depends(get_c
 
 @app.delete("/tenants/my-apps/{app_source}/webhook", tags=["Admin"])
 async def delete_my_webhook(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_webhook_write:{user['email']}", 10, 3600):
         raise HTTPException(status_code=429, detail="Too many webhook config changes — try again later")
@@ -1251,7 +1279,7 @@ def _validate_weighting_override(payload: "WeightingOverrideIn") -> None:
 
 @app.get("/tenants/my-apps/{app_source}/weighting", tags=["Admin"])
 async def list_my_weighting_overrides(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     return {"overrides": app.db.list_weighting_overrides(app_source)}
 
@@ -1261,7 +1289,7 @@ async def set_my_weighting_override(
     app_source: str, area: str, sensitivity_level: str,
     payload: WeightingOverrideIn, user=Depends(get_current_user),
 ) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_weighting_write:{user['email']}", 20, 3600):
         raise HTTPException(status_code=429, detail="Too many weighting changes — try again later")
@@ -1281,7 +1309,7 @@ async def set_my_weighting_override(
 async def delete_my_weighting_override(
     app_source: str, area: str, sensitivity_level: str, user=Depends(get_current_user),
 ) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_weighting_write:{user['email']}", 20, 3600):
         raise HTTPException(status_code=429, detail="Too many weighting changes — try again later")
@@ -1309,7 +1337,7 @@ def _validate_tenant_action_policy(payload: "TenantActionPolicyIn") -> None:
 
 @app.get("/tenants/my-apps/{app_source}/action-policies", tags=["Admin"])
 async def list_my_action_policies(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     return {"policies": app.db.list_tenant_action_policies(app_source)}
 
@@ -1318,7 +1346,7 @@ async def list_my_action_policies(app_source: str, user=Depends(get_current_user
 async def set_my_action_policy(
     app_source: str, action: str, payload: TenantActionPolicyIn, user=Depends(get_current_user),
 ) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_action_policy_write:{user['email']}", 20, 3600):
         raise HTTPException(status_code=429, detail="Too many policy changes — try again later")
@@ -1335,7 +1363,7 @@ async def set_my_action_policy(
 async def delete_my_action_policy(
     app_source: str, action: str, user=Depends(get_current_user),
 ) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_action_policy_write:{user['email']}", 20, 3600):
         raise HTTPException(status_code=429, detail="Too many policy changes — try again later")
@@ -1356,14 +1384,14 @@ class KillSwitchActivateIn(BaseModel):
 async def activate_my_kill_switch(
     app_source: str, payload: KillSwitchActivateIn, user=Depends(get_current_user),
 ) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     return activate_kill_switch(app_source, payload.reason, activated_by=user["email"])
 
 
 @app.post("/tenants/my-apps/{app_source}/kill-switch/deactivate", tags=["Admin"])
 async def deactivate_my_kill_switch(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     deactivated = deactivate_kill_switch(app_source, deactivated_by=user["email"])
     return {"deactivated": deactivated}
@@ -1371,7 +1399,7 @@ async def deactivate_my_kill_switch(app_source: str, user=Depends(get_current_us
 
 @app.get("/tenants/my-apps/{app_source}/kill-switch", tags=["Admin"])
 async def get_my_kill_switch(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     status = get_kill_switch_status(app_source)
     return status or {"scope": app_source, "active": False}
@@ -1410,14 +1438,14 @@ def _validate_agent_status(status: Optional[str]) -> None:
 
 @app.get("/tenants/my-apps/{app_source}/agents", tags=["Admin"])
 async def list_my_agents(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     return {"agents": app.db.list_agents(app_source)}
 
 
 @app.post("/tenants/my-apps/{app_source}/agents", tags=["Admin"])
 async def create_my_agent(app_source: str, payload: AgentIn, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_agent_write:{user['email']}", 20, 3600):
         raise HTTPException(status_code=429, detail="Too many agent changes — try again later")
@@ -1430,7 +1458,7 @@ async def create_my_agent(app_source: str, payload: AgentIn, user=Depends(get_cu
 
 @app.get("/tenants/my-apps/{app_source}/agents/{agent_id}", tags=["Admin"])
 async def get_my_agent(app_source: str, agent_id: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     agent_row = app.db.get_agent(agent_id)
     if not agent_row or agent_row.get("app_source") != app_source:
@@ -1442,7 +1470,7 @@ async def get_my_agent(app_source: str, agent_id: str, user=Depends(get_current_
 async def update_my_agent(
     app_source: str, agent_id: str, payload: AgentUpdateIn, user=Depends(get_current_user),
 ) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_agent_write:{user['email']}", 20, 3600):
         raise HTTPException(status_code=429, detail="Too many agent changes — try again later")
@@ -1458,7 +1486,7 @@ async def update_my_agent(
 
 @app.delete("/tenants/my-apps/{app_source}/agents/{agent_id}", tags=["Admin"])
 async def delete_my_agent(app_source: str, agent_id: str, user=Depends(get_current_user)) -> Dict[str, Any]:
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
     if not check_rate_limit(f"tenant_agent_write:{user['email']}", 20, 3600):
         raise HTTPException(status_code=429, detail="Too many agent changes — try again later")
@@ -1559,7 +1587,7 @@ async def get_my_decisions(
     underlying "truncated" flag surfaced as-is rather than silently
     dropped, same honesty standard as the PDF report's own use of it.
     """
-    if not _owns_app_source(app_source, user["email"]):
+    if not _owns_app_source(app_source, user):
         raise HTTPException(status_code=403, detail="You don't own this app_source")
 
     if not to_date:
@@ -1899,6 +1927,7 @@ async def execute_governance_decision(
     app_source: str = Form("unknown"),
     area: str = Form("DEFAULT"),
     agent_id: Optional[str] = Form(None),
+    requested_scopes: str = Form("[]"),
     user=Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Unified endpoint for executing governance decisions."""
@@ -1948,6 +1977,7 @@ async def execute_governance_decision(
     try:
         input_dict = json.loads(input_data)
         domains_list = json.loads(data_domains)
+        scopes_list = json.loads(requested_scopes)
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
 
@@ -2009,6 +2039,7 @@ async def execute_governance_decision(
             area=area,
             app_source=app_source,
             agent_id=agent_id,
+            requested_scopes=scopes_list,
         )
 
         if prefilter_result.outcome != "ALLOW":

@@ -1279,6 +1279,37 @@ class Database:
                     )
                 """)
 
+                # 2026-09-15: app_billing -- disclosed gap closed. Exists in
+                # production (created some other way, pre-dating this
+                # migration system) and app/Core/tenant/app_billing.py has
+                # depended on it since Gap 2 of the sellable-service
+                # roadmap, but nothing here ever created it -- a genuinely
+                # fresh environment's self-signup flow crashes with
+                # UndefinedTable the moment AppBillingManager touches it.
+                # Definition pulled directly from production via
+                # information_schema/pg_indexes (verbatim column types,
+                # defaults, and both partial indexes), not guessed.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.app_billing (
+                        app_source               TEXT PRIMARY KEY,
+                        plan                     TEXT NOT NULL DEFAULT 'FREE',
+                        stripe_customer_id       TEXT,
+                        stripe_subscription_id   TEXT,
+                        stripe_price_id          TEXT,
+                        status                   TEXT NOT NULL DEFAULT 'active',
+                        created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_app_billing_stripe_customer ON cgc_guard.app_billing(stripe_customer_id) "
+                    "WHERE stripe_customer_id IS NOT NULL"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_app_billing_stripe_subscription ON cgc_guard.app_billing(stripe_subscription_id) "
+                    "WHERE stripe_subscription_id IS NOT NULL"
+                )
+
                 conn.commit()
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:

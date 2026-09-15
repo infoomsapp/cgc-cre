@@ -212,6 +212,7 @@
       <button class="tabBtn active" data-tab="settings" onclick="setTab('settings')">Settings</button>
       <button class="tabBtn" data-tab="keys" onclick="setTab('keys')">API Keys</button>
       <button class="tabBtn" data-tab="webhooks" onclick="setTab('webhooks')">Webhooks</button>
+      <button class="tabBtn" data-tab="agents" onclick="setTab('agents')">Agents</button>
       <button class="tabBtn" data-tab="usage" onclick="setTab('usage')">Usage &amp; Billing</button>
       <button class="tabBtn" data-tab="history" onclick="setTab('history')">Decision History</button>
     </nav>
@@ -259,6 +260,46 @@
         <h2>Webhook</h2>
         <div class="card">
           <div class="webhookRow" id="webhookRowContent"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="tabPanel" id="tab-agents">
+      <section>
+        <h2>Agents</h2>
+        <p class="subtle" style="margin-top:-6px">Register an agent and pass its id as <code>agent_id</code> on <code>POST /governance/decision</code> so PreFilter checks against its real roles/scopes/capabilities instead of the default. Omitting <code>agent_id</code> keeps working exactly as before — this is opt-in.</p>
+        <div class="formCard">
+          <div class="formRow">
+            <div class="fieldGroup">
+              <label for="newAgentName">Name</label>
+              <input id="newAgentName" class="field" placeholder="e.g. LoanReviewBot">
+            </div>
+            <div class="fieldGroup">
+              <label for="newAgentStatus">Status</label>
+              <select id="newAgentStatus" class="field">
+                <option value="PILOT" selected>PILOT</option>
+                <option value="PRODUCTION">PRODUCTION</option>
+              </select>
+            </div>
+            <div class="fieldGroup">
+              <label for="newAgentRoles">Roles (comma-separated)</label>
+              <input id="newAgentRoles" class="field" placeholder="e.g. user">
+            </div>
+            <div class="fieldGroup">
+              <label for="newAgentCapabilities">Capabilities (comma-separated)</label>
+              <input id="newAgentCapabilities" class="field" placeholder="e.g. loan_application_review">
+            </div>
+            <button class="btn" style="width:auto" onclick="createAgent()">Register agent</button>
+          </div>
+          <div class="msg" id="createAgentMsg"></div>
+        </div>
+      </section>
+      <section>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Agent id</th><th>Name</th><th>Status</th><th>Roles</th><th>Capabilities</th><th>Actions</th></tr></thead>
+            <tbody id="agentsTableBody"></tbody>
+          </table>
         </div>
       </section>
     </div>
@@ -541,6 +582,87 @@ function renderActiveApp() {
   // Decision History tab -- fetched lazily only when that tab is active
   if (activeTab === 'history') {
     loadDecisions(a.app_source);
+  }
+  if (activeTab === 'agents') {
+    loadAgents(a.app_source);
+  }
+}
+
+const AGENT_STATUS_PILL = { PRODUCTION: 'active', PILOT: 'require_human', DEPRECATED: 'revoked', INACTIVE: 'revoked' };
+
+async function loadAgents(appSource) {
+  const el = document.getElementById('agentsTableBody');
+  el.innerHTML = '<tr><td colspan="6" class="empty">Loading…</td></tr>';
+  try {
+    const data = await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/agents`);
+    const agents = data.agents || [];
+    el.innerHTML = agents.length ? agents.map(ag => `
+      <tr>
+        <td>${esc(ag.id)}</td>
+        <td>${esc(ag.name)}</td>
+        <td><span class="pill ${AGENT_STATUS_PILL[ag.status] || 'free'}">${esc(ag.status)}</span></td>
+        <td>${esc((ag.roles || []).join(', ')) || '—'}</td>
+        <td>${esc((ag.capabilities || []).join(', ')) || '—'}</td>
+        <td class="actions">
+          <button class="btn secondary small" onclick="editAgentCapabilities('${esc(appSource)}','${esc(ag.id)}', ${JSON.stringify(ag.capabilities || []).replace(/"/g, '&quot;')})">Edit capabilities</button>
+          <button class="btn danger small" onclick="deleteAgent('${esc(appSource)}','${esc(ag.id)}')">Delete</button>
+        </td>
+      </tr>
+    `).join('') : '<tr><td colspan="6" class="empty">No agents registered yet for this app.</td></tr>';
+  } catch (e) {
+    el.innerHTML = `<tr><td colspan="6" class="empty">Error loading agents: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function createAgent() {
+  const name = document.getElementById('newAgentName').value.trim();
+  const status = document.getElementById('newAgentStatus').value;
+  const roles = document.getElementById('newAgentRoles').value.split(',').map(s => s.trim()).filter(Boolean);
+  const capabilities = document.getElementById('newAgentCapabilities').value.split(',').map(s => s.trim()).filter(Boolean);
+  const msgEl = document.getElementById('createAgentMsg');
+  msgEl.className = 'msg'; msgEl.textContent = '';
+  if (!name) { msgEl.className = 'msg err'; msgEl.textContent = 'Name is required.'; return; }
+  try {
+    await api(`/tenants/my-apps/${encodeURIComponent(activeAppSource)}/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, status, roles, capabilities }),
+    });
+    document.getElementById('newAgentName').value = '';
+    document.getElementById('newAgentRoles').value = '';
+    document.getElementById('newAgentCapabilities').value = '';
+    msgEl.className = 'msg ok';
+    msgEl.textContent = 'Agent registered.';
+    await loadAgents(activeAppSource);
+  } catch (e) {
+    msgEl.className = 'msg err';
+    msgEl.textContent = e.message;
+  }
+}
+
+async function editAgentCapabilities(appSource, agentId, currentCapabilities) {
+  const value = prompt('Capabilities (comma-separated):', (currentCapabilities || []).join(', '));
+  if (value === null) return;
+  const capabilities = value.split(',').map(s => s.trim()).filter(Boolean);
+  try {
+    await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/agents/${encodeURIComponent(agentId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ capabilities }),
+    });
+    await loadAgents(appSource);
+  } catch (e) {
+    alert('Update failed: ' + e.message);
+  }
+}
+
+async function deleteAgent(appSource, agentId) {
+  if (!confirm('Delete this agent? Any caller passing this agent_id will start getting denied.')) return;
+  try {
+    await api(`/tenants/my-apps/${encodeURIComponent(appSource)}/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
+    await loadAgents(appSource);
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
   }
 }
 
