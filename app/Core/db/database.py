@@ -1234,6 +1234,27 @@ class Database:
                     )
                 """)
 
+                # 2026-09-15: circuit breaker over repeated PreFilter
+                # short-circuit denials -- see app/modules/guard/circuit_breaker.py
+                # for the trip/cooldown/half-open state machine this table backs.
+                # Keyed on (org_id, user_email) rather than a surrogate id since
+                # that pair is always known at write time and callers only ever
+                # look this up by that same pair.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.circuit_breaker_state (
+                        actor_key        TEXT PRIMARY KEY,
+                        org_id           TEXT NOT NULL,
+                        user_email       TEXT NOT NULL,
+                        violation_count  INTEGER NOT NULL DEFAULT 0,
+                        window_start     TIMESTAMPTZ,
+                        state            TEXT NOT NULL DEFAULT 'CLOSED',
+                        opened_at        TIMESTAMPTZ,
+                        cooldown_until   TIMESTAMPTZ,
+                        updated_at       TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_guard_circuit_breaker_state ON cgc_guard.circuit_breaker_state(state)")
+
                 conn.commit()
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:

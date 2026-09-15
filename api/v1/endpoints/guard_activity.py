@@ -15,11 +15,13 @@ so this file has no auth logic of its own - same pattern as every other router.
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from app.Core.db.database import get_database
 from app.modules.guard.payload_guard import get_recent_suspicious_payloads
 from app.modules.guard.internal_guard import get_recent_internal_flags
 from app.modules.guard.login_guard import get_login_activity_stats
+from app.modules.guard.circuit_breaker import list_open_breakers, reset_breaker
 
 router = APIRouter()
 
@@ -49,3 +51,20 @@ async def guard_timeseries(hours: int = Query(24, ge=1, le=168)) -> Dict[str, An
     """Powers the Security dashboard's live chart. See
     Database.get_guard_events_timeseries()'s docstring for the query shape."""
     return get_database().get_guard_events_timeseries(hours=hours)
+
+
+@router.get("/circuit-breakers", summary="Currently OPEN/HALF_OPEN circuit breakers")
+async def circuit_breakers(limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+    rows = list_open_breakers(limit=limit)
+    return {"total": len(rows), "breakers": rows}
+
+
+class CircuitBreakerResetRequest(BaseModel):
+    org_id: str
+    user_email: str
+
+
+@router.post("/circuit-breakers/reset", summary="Manually close a tripped circuit breaker")
+async def reset_circuit_breaker(body: CircuitBreakerResetRequest) -> Dict[str, Any]:
+    reset = reset_breaker(body.org_id, body.user_email)
+    return {"reset": reset, "org_id": body.org_id, "user_email": body.user_email}

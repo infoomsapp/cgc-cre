@@ -36,7 +36,7 @@ from app.Core.config import config
 from app.Core.logging import logging_config
 
 # Core Governance Modules
-from app.modules.prefilter.PreFilter import PreFilter, Agent, EnforcementContext
+from app.modules.prefilter.PreFilter import PreFilter, Agent, EnforcementContext, PreFilterResult
 from app.modules.scm.scmmodule import SCM
 from app.modules.ecm.ecmmodule import ECM
 from app.modules.pfm.pfmmodule import PFM
@@ -81,6 +81,7 @@ from app.modules.guard.rate_limiter import check_rate_limit
 from app.modules.guard.payload_guard import scan_payload, record_suspicious_payload
 from app.modules.guard.enforcement import is_hard_mode as is_guard_hard_mode
 from app.modules.guard.webhook_url_guard import validate_webhook_url, is_still_safe_to_deliver
+from app.modules.guard.circuit_breaker import check_breaker, record_violation, record_success
 
 # Internal guard router (Phase 3 of the reinforcement plan) — read-only
 # misuse-detection report over the TCO ledger.
@@ -308,6 +309,36 @@ async def run_cgc_prefilter(
     # checking a key that never exists, always silently falling back.
     user_roles = [user.get("role", "user")]
 
+    # Circuit breaker (item #2 of the action-governance plan, after
+    # PreFilter's own action_within_capabilities check): repeated
+    # PreFilter short-circuit denials from this (org_id, user_email) pair
+    # within a trailing window trip the breaker OPEN, which then denies
+    # every request from that pair immediately -- without running any
+    # PreFilter check at all -- until a cooldown elapses. See
+    # app/modules/guard/circuit_breaker.py for the full state machine.
+    breaker_block = check_breaker(org_id, user_email)
+    if breaker_block:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        result = PreFilterResult(
+            trace_id=f"pf_{secrets.token_hex(8)}",
+            correlation_id=f"corr_{secrets.token_hex(8)}",
+            timestamp=now_iso,
+            outcome="DENY",
+            short_circuit=True,
+            agentValidated=False,
+            agentStatus=None,
+            userRolesMatched=False,
+            scopesValid=False,
+            actionWithinCapabilities=False,
+            blockedDomainsDetected=False,
+            areaIdentified=area,
+            sensitiveDomainsCount=0,
+            checks=[],
+            reason=breaker_block["reason"],
+        )
+        app.db.save_prefilter_result(result.correlation_id, result.to_dict())
+        return result
+
     # PreFilter.evaluate() requires a registered Agent (id/roles/scopes/
     # owners/capabilities) to check RBAC/scopes against -- confirmed via
     # full repo search that no agent registry exists anywhere (no DB table,
@@ -345,6 +376,14 @@ async def run_cgc_prefilter(
 
     # PREFILTER (ultra-fast <10ms)
     result = app.prefilter.evaluate(agent, context)
+
+    # Feed the circuit breaker: a short-circuit DENY counts as a policy
+    # violation toward tripping it; an ALLOW closes it if it was serving
+    # as the post-cooldown HALF_OPEN trial.
+    if result.short_circuit:
+        record_violation(org_id, user_email)
+    else:
+        record_success(org_id, user_email)
 
     # Save in DB for TCO
     app.db.save_prefilter_result(result.correlation_id, result.to_dict())

@@ -16,6 +16,13 @@ from .internal_guard import (
     get_recent_internal_flags,
 )
 from .enforcement import is_hard_mode
+from .circuit_breaker import (
+    check_breaker,
+    record_violation,
+    record_success,
+    list_open_breakers,
+    reset_breaker,
+)
 
 __all__ = [
     "check_rate_limit",
@@ -32,4 +39,9 @@ __all__ = [
     "record_internal_flag",
     "get_recent_internal_flags",
     "is_hard_mode",
+    "check_breaker",
+    "record_violation",
+    "record_success",
+    "list_open_breakers",
+    "reset_breaker",
 ]
