@@ -307,6 +307,7 @@ async def run_cgc_prefilter(
     user: Dict[str, Any],
     area: str = "DEFAULT",
     app_source: str = "unknown",
+    agent_id: Optional[str] = None,
 ) -> Any:
     """Ejecutar CGC-PreFilter."""
 
@@ -404,30 +405,81 @@ async def run_cgc_prefilter(
         app.db.save_prefilter_result(result.correlation_id, result.to_dict())
         return result
 
-    # PreFilter.evaluate() requires a registered Agent (id/roles/scopes/
-    # owners/capabilities) to check RBAC/scopes against -- confirmed via
-    # full repo search that no agent registry exists anywhere (no DB table,
-    # no lookup class, no auth-token field); Agent is otherwise only ever
-    # constructed once, as demo data in PreFilter.py's __main__ block. This
-    # endpoint has no agent_id in its request shape either. Synthesizing a
-    # permissive per-request Agent that mirrors the caller's own already-
-    # authenticated role is the only thing there's real data for -- it
-    # makes agent_exists/user_rbac/scopes_exist trivially satisfied (agent
-    # roles == user roles, requested_scopes is empty) without inventing new
-    # access-control policy. A real agent registry, if this product ever
-    # needs distinct per-agent permissions, is a separate feature to build.
+    # 2026-09-15: real agent registry. Historically PreFilter.evaluate()
+    # requires a registered Agent (id/roles/scopes/owners/capabilities) to
+    # check RBAC/scopes against, but there was no agent registry anywhere
+    # (no DB table, no lookup class, no auth-token field) and no agent_id
+    # in this endpoint's request shape either -- a permissive per-request
+    # Agent mirroring the caller's own already-authenticated role was
+    # synthesized instead, making agent_exists/user_rbac/scopes_exist
+    # trivially satisfied (agent roles == user roles, requested_scopes
+    # always empty). That's *why* the action_within_capabilities gap
+    # existed as long as it did: capabilities=[] always, by construction,
+    # meant CHECK 4B's safety valve made it inert for every real caller.
+    #
+    # `agent_id` (optional) is the fix: when the caller provides one AND
+    # it resolves to a real, tenant-owned agent, PreFilter evaluates
+    # against THAT agent's real roles/scopes/capabilities -- user_rbac
+    # (CHECK 3) becomes a genuine check instead of vacuously true, and
+    # action_within_capabilities (CHECK 4B) actually enforces something
+    # for callers that opted in. Omitting agent_id (every current
+    # integration -- LedgiProof, ControlMiles, Xolphi) keeps today's exact
+    # synthesized-Agent behavior: purely additive, zero breaking change.
+    #
+    # A provided agent_id that doesn't resolve, or resolves to an agent
+    # owned by a DIFFERENT app_source, is a hard DENY here -- never a
+    # silent fallback to the permissive synthesized agent. Falling back
+    # would let a caller claim an arbitrary agent_id and, if it happened
+    # not to exist (or belong to someone else), get the exact same
+    # permissive treatment as never having claimed one at all -- the one
+    # spoofing shape this feature must not open.
     now_iso = datetime.now(timezone.utc).isoformat()
-    agent = Agent(
-        id=f"agent-{org_id}",
-        name=f"{org_id} default agent",
-        status="PRODUCTION",
-        roles=user_roles,
-        scopes=[],
-        owners=[],
-        capabilities=[],
-        created_at=now_iso,
-        updated_at=now_iso,
-    )
+    if agent_id:
+        agent_row = app.db.get_agent(agent_id)
+        if not agent_row or agent_row.get("app_source") != app_source:
+            record_violation(org_id, user_email)
+            result = PreFilterResult(
+                trace_id=f"pf_{secrets.token_hex(8)}",
+                correlation_id=f"corr_{secrets.token_hex(8)}",
+                timestamp=now_iso,
+                outcome="DENY",
+                short_circuit=True,
+                agentValidated=False,
+                agentStatus=None,
+                userRolesMatched=False,
+                scopesValid=False,
+                actionWithinCapabilities=False,
+                blockedDomainsDetected=False,
+                areaIdentified=area,
+                sensitiveDomainsCount=0,
+                checks=[],
+                reason=f"agent_id '{agent_id}' not found for app_source '{app_source}'",
+            )
+            app.db.save_prefilter_result(result.correlation_id, result.to_dict())
+            return result
+        agent = Agent(
+            id=agent_row["id"],
+            name=agent_row["name"],
+            status=agent_row["status"],
+            roles=agent_row.get("roles") or [],
+            scopes=agent_row.get("scopes") or [],
+            owners=agent_row.get("owners") or [],
+            capabilities=agent_row.get("capabilities") or [],
+            created_at=str(agent_row.get("created_at", now_iso)),
+            updated_at=str(agent_row.get("updated_at", now_iso)),
+        )
+    else:
+        agent = Agent(
+            id=f"agent-{org_id}",
+            name=f"{org_id} default agent",
+            status="PRODUCTION",
+            roles=user_roles,
+            scopes=[],
+            owners=[],
+            capabilities=[],
+            created_at=now_iso,
+            updated_at=now_iso,
+        )
 
     context = EnforcementContext(
         user_id=user.get("id", user_email),
@@ -1325,6 +1377,98 @@ async def get_my_kill_switch(app_source: str, user=Depends(get_current_user)) ->
     return status or {"scope": app_source, "active": False}
 
 
+# Agent registry (2026-09-15 -- closes the root cause behind the whole
+# action-governance stack: see Database._create_agents_schema()'s
+# docstring context and run_cgc_prefilter's own comment on `agent_id`
+# for the full reasoning). Self-service, tenant-owned, same ownership
+# posture as everything else under /tenants/my-apps/.
+_VALID_AGENT_STATUSES = {"PILOT", "PRODUCTION", "DEPRECATED", "INACTIVE"}
+
+
+class AgentIn(BaseModel):
+    name: str
+    status: str = "PILOT"
+    roles: List[str] = []
+    scopes: List[str] = []
+    capabilities: List[str] = []
+    owners: List[Dict[str, str]] = []
+
+
+class AgentUpdateIn(BaseModel):
+    name: Optional[str] = None
+    status: Optional[str] = None
+    roles: Optional[List[str]] = None
+    scopes: Optional[List[str]] = None
+    capabilities: Optional[List[str]] = None
+    owners: Optional[List[Dict[str, str]]] = None
+
+
+def _validate_agent_status(status: Optional[str]) -> None:
+    if status is not None and status not in _VALID_AGENT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(_VALID_AGENT_STATUSES)}")
+
+
+@app.get("/tenants/my-apps/{app_source}/agents", tags=["Admin"])
+async def list_my_agents(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    return {"agents": app.db.list_agents(app_source)}
+
+
+@app.post("/tenants/my-apps/{app_source}/agents", tags=["Admin"])
+async def create_my_agent(app_source: str, payload: AgentIn, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_agent_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many agent changes — try again later")
+    _validate_agent_status(payload.status)
+
+    row = app.db.create_agent(app_source, payload.model_dump(), created_by=user["email"])
+    logger.info(f"[agents] agent created: app_source={app_source} id={row.get('id')} by={user['email']}")
+    return row
+
+
+@app.get("/tenants/my-apps/{app_source}/agents/{agent_id}", tags=["Admin"])
+async def get_my_agent(app_source: str, agent_id: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    agent_row = app.db.get_agent(agent_id)
+    if not agent_row or agent_row.get("app_source") != app_source:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent_row
+
+
+@app.put("/tenants/my-apps/{app_source}/agents/{agent_id}", tags=["Admin"])
+async def update_my_agent(
+    app_source: str, agent_id: str, payload: AgentUpdateIn, user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_agent_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many agent changes — try again later")
+    existing = app.db.get_agent(agent_id)
+    if not existing or existing.get("app_source") != app_source:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    _validate_agent_status(payload.status)
+
+    row = app.db.update_agent(agent_id, payload.model_dump(exclude_unset=True))
+    logger.info(f"[agents] agent updated: app_source={app_source} id={agent_id} by={user['email']}")
+    return row
+
+
+@app.delete("/tenants/my-apps/{app_source}/agents/{agent_id}", tags=["Admin"])
+async def delete_my_agent(app_source: str, agent_id: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_agent_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many agent changes — try again later")
+    existing = app.db.get_agent(agent_id)
+    if not existing or existing.get("app_source") != app_source:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    deleted = app.db.delete_agent(agent_id)
+    return {"deleted": deleted}
+
+
 async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any]) -> None:
     """
     Best-effort outbound notification, synchronous with a strict timeout.
@@ -1754,6 +1898,7 @@ async def execute_governance_decision(
     data_domains: str = Form(...),
     app_source: str = Form("unknown"),
     area: str = Form("DEFAULT"),
+    agent_id: Optional[str] = Form(None),
     user=Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Unified endpoint for executing governance decisions."""
@@ -1863,6 +2008,7 @@ async def execute_governance_decision(
             user=user,
             area=area,
             app_source=app_source,
+            agent_id=agent_id,
         )
 
         if prefilter_result.outcome != "ALLOW":

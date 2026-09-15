@@ -7,6 +7,7 @@ OlympusMont Systems LLC  2025
 
 import os
 import json
+import secrets
 import time
 import logging
 import hashlib
@@ -1677,7 +1678,7 @@ class Database:
             "cgc_audit_traces", "cgc_calibration_changelog", "cgc_error_reports", "cgc_feedback",
             "cgc_launch_checklist_items", "cgc_launch_errors", "cgc_launch_snapshot", "cgc_loop_decisions",
             "cgc_module_results", "cgc_prefilter_results", "cgc_saml_connections", "cgc_tenant_webhooks",
-            "cgc_tenant_weighting_overrides", "cgc_tenant_action_policies", "cgc_webhook_retry_queue",
+            "cgc_tenant_weighting_overrides", "cgc_tenant_action_policies", "cgc_webhook_retry_queue", "cgc_agents",
             "decision_modules", "decisions_2026_04", "decisions_2026_05", "decisions_2026_06",
             "pod_chain", "prefilter_results", "retention_log", "sessions", "tenants", "users",
         ]
@@ -3690,6 +3691,161 @@ class Database:
                 found = len(remaining) != len(rows)
                 if found:
                     self._write_json_list('tenant_action_policies.json', remaining)
+                return found
+
+    # ======================================================================
+    # AGENT REGISTRY (2026-09-15 -- closes the root cause behind the whole
+    # action-governance stack above: PreFilter.evaluate()'s Agent dataclass
+    # -- id/roles/scopes/owners/capabilities -- has existed since that
+    # module's creation, but the only real call site (main.py's
+    # run_cgc_prefilter) never had anything to look one up FROM, and always
+    # synthesized a permissive per-request Agent mirroring the caller's own
+    # role (capabilities=[] always). Every enforcement layer built on top of
+    # that (action_within_capabilities, the circuit breaker, tenant action
+    # policies) was therefore keyed on (org_id, user_email)/app_source --
+    # real, stable identities, but NOT an actual agent identity.
+    # ======================================================================
+    # One row per registered agent, tenant-owned (app_source), self-service
+    # like API keys. Deliberately ADDITIVE, not a breaking change: the new
+    # `agent_id` parameter on POST /governance/decision (see main.py) is
+    # OPTIONAL. Omit it and today's exact synthesized-Agent behavior is
+    # unchanged -- every current integration (LedgiProof, ControlMiles,
+    # Xolphi) keeps working with zero changes required. Pass a real,
+    # owned agent_id and PreFilter evaluates against THAT agent's real
+    # roles/scopes/capabilities instead -- e.g. user_rbac (CHECK 3) becomes
+    # a genuine check instead of trivially true, since agent.roles is no
+    # longer defined as == the caller's own role by construction.
+
+    def _create_agents_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_agents (
+                        id            VARCHAR(64) PRIMARY KEY,
+                        app_source    VARCHAR(50) NOT NULL,
+                        name          VARCHAR(255) NOT NULL,
+                        status        VARCHAR(20) NOT NULL DEFAULT 'PILOT',
+                        roles         TEXT[] NOT NULL DEFAULT '{}',
+                        scopes        TEXT[] NOT NULL DEFAULT '{}',
+                        capabilities  TEXT[] NOT NULL DEFAULT '{}',
+                        owners        JSONB NOT NULL DEFAULT '[]',
+                        created_by    VARCHAR(255),
+                        created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_agents_app_source ON cgc_agents(app_source)")
+                logger.info("Agent registry schema ready")
+        except Exception as e:
+            logger.warning(f"_create_agents_schema failed (non-fatal): {e}")
+
+    _VALID_AGENT_STATUSES = {"PILOT", "PRODUCTION", "DEPRECATED", "INACTIVE"}
+
+    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM cgc_agents WHERE id = %s", (agent_id,))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            for r in self._read_json_list('agents.json'):
+                if r.get('id') == agent_id:
+                    return r
+            return None
+
+    def list_agents(self, app_source: str) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM cgc_agents WHERE app_source = %s ORDER BY created_at", (app_source,))
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            rows = [r for r in self._read_json_list('agents.json') if r.get('app_source') == app_source]
+            rows.sort(key=lambda r: r.get('created_at', ''))
+            return rows
+
+    def create_agent(self, app_source: str, agent: Dict[str, Any], created_by: str) -> Dict[str, Any]:
+        agent_id = f"agent_{secrets.token_hex(10)}"
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_agents (id, app_source, name, status, roles, scopes, capabilities, owners, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING *
+                    """, (
+                        agent_id, app_source, agent['name'], agent.get('status', 'PILOT'),
+                        agent.get('roles', []), agent.get('scopes', []), agent.get('capabilities', []),
+                        json.dumps(agent.get('owners', [])), created_by,
+                    ))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                rows = self._read_json_list('agents.json')
+                now = datetime.now(timezone.utc).isoformat()
+                new_row = {
+                    'id': agent_id, 'app_source': app_source, 'name': agent['name'],
+                    'status': agent.get('status', 'PILOT'), 'roles': agent.get('roles', []),
+                    'scopes': agent.get('scopes', []), 'capabilities': agent.get('capabilities', []),
+                    'owners': agent.get('owners', []), 'created_by': created_by,
+                    'created_at': now, 'updated_at': now,
+                }
+                rows.append(new_row)
+                self._write_json_list('agents.json', rows)
+                return new_row
+
+    def update_agent(self, agent_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        UPDATE cgc_agents SET
+                            name = COALESCE(%s, name), status = COALESCE(%s, status),
+                            roles = COALESCE(%s, roles), scopes = COALESCE(%s, scopes),
+                            capabilities = COALESCE(%s, capabilities),
+                            owners = COALESCE(%s, owners), updated_at = NOW()
+                        WHERE id = %s
+                        RETURNING *
+                    """, (
+                        updates.get('name'), updates.get('status'), updates.get('roles'),
+                        updates.get('scopes'), updates.get('capabilities'),
+                        json.dumps(updates['owners']) if updates.get('owners') is not None else None,
+                        agent_id,
+                    ))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            with self.json_lock:
+                rows = self._read_json_list('agents.json')
+                for i, r in enumerate(rows):
+                    if r.get('id') == agent_id:
+                        for key in ('name', 'status', 'roles', 'scopes', 'capabilities', 'owners'):
+                            if updates.get(key) is not None:
+                                r[key] = updates[key]
+                        r['updated_at'] = datetime.now(timezone.utc).isoformat()
+                        rows[i] = r
+                        self._write_json_list('agents.json', rows)
+                        return r
+                return None
+
+    def delete_agent(self, agent_id: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM cgc_agents WHERE id = %s", (agent_id,))
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                rows = self._read_json_list('agents.json')
+                remaining = [r for r in rows if r.get('id') != agent_id]
+                found = len(remaining) != len(rows)
+                if found:
+                    self._write_json_list('agents.json', remaining)
                 return found
 
     # ======================================================================
