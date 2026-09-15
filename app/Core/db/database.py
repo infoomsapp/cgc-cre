@@ -1310,6 +1310,34 @@ class Database:
                     "WHERE stripe_subscription_id IS NOT NULL"
                 )
 
+                # 2026-09-15: RLS lockdown for the 5 tables in this method
+                # that never got it (a Supabase advisor sweep found them
+                # disabled) -- rate_limit_events, login_attempts,
+                # app_billing, circuit_breaker_state, kill_switch_state.
+                # internal_flags/suspicious_payloads/tenant_usage/
+                # tenant_plans are deliberately excluded here: they already
+                # have RLS enabled with real policies from
+                # _create_rls_policies() (some are written via the
+                # RLS-restricted cgc_app role, not just the bypass admin
+                # role, so a blanket deny_all would break their real write
+                # path). The 5 here are only ever touched via
+                # db.get_connection() (the bypass-RLS admin role) in
+                # rate_limiter.py/login_guard.py/app_billing.py/
+                # circuit_breaker.py/kill_switch.py -- confirmed via a full
+                # grep of each module -- so deny_all is correct and has zero
+                # functional impact on this app. Same reasoning as
+                # cgc_auth's own lockdown just above: these tables never had
+                # anon/authenticated grants in the first place (verified via
+                # information_schema -- cgc_guard, like cgc_auth, is a
+                # schema this app's own migrations created, so it never
+                # inherited Supabase's automatic public-schema PostgREST
+                # grants), so this is defense in depth against a future
+                # mistake, not a fix for a live exploit.
+                for _t in ("rate_limit_events", "login_attempts", "app_billing", "circuit_breaker_state", "kill_switch_state"):
+                    cur.execute(f'ALTER TABLE cgc_guard.{_t} ENABLE ROW LEVEL SECURITY')
+                    cur.execute(f'DROP POLICY IF EXISTS deny_all ON cgc_guard.{_t}')
+                    cur.execute(f'CREATE POLICY deny_all ON cgc_guard.{_t} USING (false) WITH CHECK (false)')
+
                 conn.commit()
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:
@@ -1505,6 +1533,32 @@ class Database:
                     ON cgc_auth.api_keys (key_hash) WHERE revoked_at IS NULL
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_app_source ON cgc_auth.api_keys (app_source)")
+
+                # 2026-09-15: RLS lockdown -- a Supabase advisor sweep found
+                # all 4 tables here (users, sessions, blocklist, api_keys --
+                # password hashes, live session tokens, and API key hashes)
+                # had RLS disabled. Confirmed live this was never actually
+                # exploitable: cgc_auth, unlike `public`, is a schema this
+                # app's own migrations created, so it never inherited
+                # Supabase's automatic anon/authenticated PostgREST grants
+                # in the first place (verified via information_schema --
+                # zero grants for either role on any table here) -- and this
+                # app only ever talks to Postgres via psycopg2 as the
+                # `postgres` role (rolbypassrls=true), never PostgREST. So
+                # RLS's own enabled/disabled state was never the actual gate
+                # for these tables. Enabled anyway, same
+                # ENABLE+deny_all-policy pattern as every other table this
+                # codebase has locked down (_lock_down_public_schema_grants,
+                # cgc_guard.*) -- defense in depth against the day a grant
+                # is ever added here by mistake, and to close the advisor
+                # finding for good rather than argue it's moot. A deny_all
+                # policy blocks anon/authenticated even if they somehow
+                # gain a grant later; it does not and cannot affect the
+                # bypass-RLS admin role this app actually connects as.
+                for _t in ("users", "sessions", "blocklist", "api_keys"):
+                    cur.execute(f'ALTER TABLE cgc_auth.{_t} ENABLE ROW LEVEL SECURITY')
+                    cur.execute(f'DROP POLICY IF EXISTS deny_all ON cgc_auth.{_t}')
+                    cur.execute(f'CREATE POLICY deny_all ON cgc_auth.{_t} USING (false) WITH CHECK (false)')
 
                 conn.commit()
                 logger.info("cgc_auth schema created/verified")
