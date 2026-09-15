@@ -22,6 +22,10 @@ from app.modules.guard.payload_guard import get_recent_suspicious_payloads
 from app.modules.guard.internal_guard import get_recent_internal_flags
 from app.modules.guard.login_guard import get_login_activity_stats
 from app.modules.guard.circuit_breaker import list_open_breakers, reset_breaker
+from app.modules.guard.kill_switch import (
+    activate_kill_switch, deactivate_kill_switch, get_kill_switch_status,
+    list_active_kill_switches, GLOBAL_SCOPE,
+)
 
 router = APIRouter()
 
@@ -68,3 +72,37 @@ class CircuitBreakerResetRequest(BaseModel):
 async def reset_circuit_breaker(body: CircuitBreakerResetRequest) -> Dict[str, Any]:
     reset = reset_breaker(body.org_id, body.user_email)
     return {"reset": reset, "org_id": body.org_id, "user_email": body.user_email}
+
+
+class KillSwitchActionRequest(BaseModel):
+    scope: str  # 'GLOBAL' or a specific app_source
+    reason: Optional[str] = None
+
+
+@router.get("/kill-switches", summary="Currently active kill switches (GLOBAL + any tenant)")
+async def kill_switches() -> Dict[str, Any]:
+    rows = list_active_kill_switches()
+    return {"total": len(rows), "kill_switches": rows}
+
+
+@router.post("/kill-switches/activate", summary="Activate a kill switch (GLOBAL halts every tenant)")
+async def activate_kill_switch_endpoint(body: KillSwitchActionRequest) -> Dict[str, Any]:
+    # Operator override -- unlike the self-service /tenants/my-apps/{app_source}/
+    # kill-switch/* routes, this can target ANY scope including GLOBAL, for
+    # incident response when a tenant can't (or shouldn't have to) act
+    # themselves, or the whole platform needs to stop.
+    #
+    # activated_by is a generic "admin" label, not the caller's real
+    # email, same limitation every other route in this file already has:
+    # this router only gets require_admin_or_service applied at the
+    # mount level in main.py (see module docstring), with no per-route
+    # access to the resolved user object -- an existing gap in this
+    # codebase's router architecture, not something to special-case a new
+    # pattern around here just for this one action's audit trail.
+    return activate_kill_switch(body.scope, body.reason, activated_by="admin")
+
+
+@router.post("/kill-switches/deactivate", summary="Deactivate a kill switch")
+async def deactivate_kill_switch_endpoint(body: KillSwitchActionRequest) -> Dict[str, Any]:
+    deactivated = deactivate_kill_switch(body.scope, deactivated_by="admin")
+    return {"deactivated": deactivated, "scope": body.scope}

@@ -23,6 +23,15 @@ from .circuit_breaker import (
     list_open_breakers,
     reset_breaker,
 )
+from .tenant_policy import evaluate_tenant_policy
+from .kill_switch import (
+    is_killed,
+    activate_kill_switch,
+    deactivate_kill_switch,
+    get_kill_switch_status,
+    list_active_kill_switches,
+    GLOBAL_SCOPE,
+)
 
 __all__ = [
     "check_rate_limit",
@@ -44,4 +53,11 @@ __all__ = [
     "record_success",
     "list_open_breakers",
     "reset_breaker",
+    "evaluate_tenant_policy",
+    "is_killed",
+    "activate_kill_switch",
+    "deactivate_kill_switch",
+    "get_kill_switch_status",
+    "list_active_kill_switches",
+    "GLOBAL_SCOPE",
 ]

@@ -82,6 +82,11 @@ from app.modules.guard.payload_guard import scan_payload, record_suspicious_payl
 from app.modules.guard.enforcement import is_hard_mode as is_guard_hard_mode
 from app.modules.guard.webhook_url_guard import validate_webhook_url, is_still_safe_to_deliver
 from app.modules.guard.circuit_breaker import check_breaker, record_violation, record_success
+from app.modules.guard.tenant_policy import evaluate_tenant_policy, VALID_POLICY_TYPES
+from app.modules.guard.kill_switch import (
+    is_killed, activate_kill_switch, deactivate_kill_switch,
+    get_kill_switch_status, list_active_kill_switches, GLOBAL_SCOPE,
+)
 
 # Internal guard router (Phase 3 of the reinforcement plan) — read-only
 # misuse-detection report over the TCO ledger.
@@ -300,7 +305,8 @@ async def run_cgc_prefilter(
     action: str,
     data_domains: List[str],
     user: Dict[str, Any],
-    area: str = "DEFAULT"
+    area: str = "DEFAULT",
+    app_source: str = "unknown",
 ) -> Any:
     """Ejecutar CGC-PreFilter."""
 
@@ -308,6 +314,34 @@ async def run_cgc_prefilter(
     # string, confirmed in auth_system.py) -- .get("roles", ...) here was
     # checking a key that never exists, always silently falling back.
     user_roles = [user.get("role", "user")]
+
+    # Kill switch (item #4, last of the action-governance plan): checked
+    # FIRST, before the circuit breaker or tenant action policies -- an
+    # unconditional emergency stop (GLOBAL platform-wide, or this
+    # app_source's own) that must win over every other, more selective
+    # check. See app/modules/guard/kill_switch.py.
+    kill = is_killed(app_source)
+    if kill:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        result = PreFilterResult(
+            trace_id=f"pf_{secrets.token_hex(8)}",
+            correlation_id=f"corr_{secrets.token_hex(8)}",
+            timestamp=now_iso,
+            outcome="DENY",
+            short_circuit=True,
+            agentValidated=False,
+            agentStatus=None,
+            userRolesMatched=False,
+            scopesValid=False,
+            actionWithinCapabilities=False,
+            blockedDomainsDetected=False,
+            areaIdentified=area,
+            sensitiveDomainsCount=0,
+            checks=[],
+            reason=f"[{kill['scope']}] {kill['reason']}",
+        )
+        app.db.save_prefilter_result(result.correlation_id, result.to_dict())
+        return result
 
     # Circuit breaker (item #2 of the action-governance plan, after
     # PreFilter's own action_within_capabilities check): repeated
@@ -335,6 +369,37 @@ async def run_cgc_prefilter(
             sensitiveDomainsCount=0,
             checks=[],
             reason=breaker_block["reason"],
+        )
+        app.db.save_prefilter_result(result.correlation_id, result.to_dict())
+        return result
+
+    # Tenant action policy (item #3 of the action-governance plan): a
+    # tenant-owned, self-service BLOCK/REQUIRE_HUMAN_REVIEW rule for this
+    # (app_source, action), optionally conditioned on area/data_domains --
+    # see app/modules/guard/tenant_policy.py. Keyed on app_source (the
+    # self-service tenant identity, same as weighting overrides/webhooks),
+    # not org_id -- a caller with no bound/allowlisted app_source (still
+    # "unknown" at this point) has nothing to look up.
+    tenant_policy_hit = evaluate_tenant_policy(app_source, action, area, data_domains)
+    if tenant_policy_hit:
+        record_violation(org_id, user_email)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        result = PreFilterResult(
+            trace_id=f"pf_{secrets.token_hex(8)}",
+            correlation_id=f"corr_{secrets.token_hex(8)}",
+            timestamp=now_iso,
+            outcome="REQUIRE_HUMAN" if tenant_policy_hit["policy_type"] == "REQUIRE_HUMAN_REVIEW" else "DENY",
+            short_circuit=True,
+            agentValidated=False,
+            agentStatus=None,
+            userRolesMatched=False,
+            scopesValid=False,
+            actionWithinCapabilities=False,
+            blockedDomainsDetected=False,
+            areaIdentified=area,
+            sensitiveDomainsCount=0,
+            checks=[],
+            reason=tenant_policy_hit["reason"],
         )
         app.db.save_prefilter_result(result.correlation_id, result.to_dict())
         return result
@@ -1172,6 +1237,94 @@ async def delete_my_weighting_override(
     return {"deleted": deleted}
 
 
+# Per-tenant conditional action policies (item #3 of the AI-agent
+# action-governance plan, 2026-09-15 -- see
+# app/modules/guard/tenant_policy.py's header for how this differs from
+# both PreFilter's agent-level action_within_capabilities check and the
+# circuit breaker). Same self-service, ownership-checked posture as the
+# weighting-override endpoints just above.
+class TenantActionPolicyIn(BaseModel):
+    policy_type: str
+    area: Optional[str] = None
+    blocked_data_domains: Optional[List[str]] = None
+    reason: Optional[str] = None
+
+
+def _validate_tenant_action_policy(payload: "TenantActionPolicyIn") -> None:
+    if payload.policy_type not in VALID_POLICY_TYPES:
+        raise HTTPException(status_code=400, detail=f"policy_type must be one of {sorted(VALID_POLICY_TYPES)}")
+
+
+@app.get("/tenants/my-apps/{app_source}/action-policies", tags=["Admin"])
+async def list_my_action_policies(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    return {"policies": app.db.list_tenant_action_policies(app_source)}
+
+
+@app.put("/tenants/my-apps/{app_source}/action-policies/{action}", tags=["Admin"])
+async def set_my_action_policy(
+    app_source: str, action: str, payload: TenantActionPolicyIn, user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_action_policy_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many policy changes — try again later")
+    _validate_tenant_action_policy(payload)
+
+    row = app.db.set_tenant_action_policy(
+        app_source, action, payload.model_dump(), updated_by=user["email"],
+    )
+    logger.info(f"[tenant_policy] policy set: app_source={app_source} action={action} type={payload.policy_type} by={user['email']}")
+    return row
+
+
+@app.delete("/tenants/my-apps/{app_source}/action-policies/{action}", tags=["Admin"])
+async def delete_my_action_policy(
+    app_source: str, action: str, user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    if not check_rate_limit(f"tenant_action_policy_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many policy changes — try again later")
+    deleted = app.db.delete_tenant_action_policy(app_source, action)
+    return {"deleted": deleted}
+
+
+# Self-service, per-tenant kill switch (item #4 of the action-governance
+# plan). Same ownership model as everything else under /tenants/my-apps/
+# -- a tenant can only trip/clear their OWN app_source's switch. The
+# platform-wide GLOBAL switch is operator-only, see /admin/kill-switch
+# in guard_activity.py.
+class KillSwitchActivateIn(BaseModel):
+    reason: Optional[str] = None
+
+
+@app.post("/tenants/my-apps/{app_source}/kill-switch/activate", tags=["Admin"])
+async def activate_my_kill_switch(
+    app_source: str, payload: KillSwitchActivateIn, user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    return activate_kill_switch(app_source, payload.reason, activated_by=user["email"])
+
+
+@app.post("/tenants/my-apps/{app_source}/kill-switch/deactivate", tags=["Admin"])
+async def deactivate_my_kill_switch(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    deactivated = deactivate_kill_switch(app_source, deactivated_by=user["email"])
+    return {"deactivated": deactivated}
+
+
+@app.get("/tenants/my-apps/{app_source}/kill-switch", tags=["Admin"])
+async def get_my_kill_switch(app_source: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    if not _owns_app_source(app_source, user["email"]):
+        raise HTTPException(status_code=403, detail="You don't own this app_source")
+    status = get_kill_switch_status(app_source)
+    return status or {"scope": app_source, "active": False}
+
+
 async def _deliver_webhook(app_source: str, event: str, payload: Dict[str, Any]) -> None:
     """
     Best-effort outbound notification, synchronous with a strict timeout.
@@ -1708,7 +1861,8 @@ async def execute_governance_decision(
             action=action,
             data_domains=domains_list,
             user=user,
-            area=area
+            area=area,
+            app_source=app_source,
         )
 
         if prefilter_result.outcome != "ALLOW":

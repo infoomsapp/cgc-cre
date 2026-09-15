@@ -1255,6 +1255,29 @@ class Database:
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_guard_circuit_breaker_state ON cgc_guard.circuit_breaker_state(state)")
 
+                # 2026-09-15: kill switch -- item #4 of the AI-agent
+                # action-governance plan. `scope` is either the literal
+                # string 'GLOBAL' (platform-wide emergency stop) or a real
+                # app_source (a single tenant's emergency stop, self-
+                # service-triggerable by that tenant's own owner). See
+                # app/modules/guard/kill_switch.py -- checked first, before
+                # the circuit breaker or tenant action policies, at the top
+                # of every /governance/decision call: the entire point of a
+                # kill switch is that it works without a code deploy and
+                # short-circuits everything else immediately.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_guard.kill_switch_state (
+                        scope           TEXT PRIMARY KEY,
+                        active          BOOLEAN NOT NULL DEFAULT TRUE,
+                        reason          TEXT,
+                        activated_by    TEXT,
+                        activated_at    TIMESTAMPTZ DEFAULT NOW(),
+                        deactivated_by  TEXT,
+                        deactivated_at  TIMESTAMPTZ,
+                        updated_at      TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+
                 conn.commit()
                 logger.info("cgc_guard schema created/verified")
         except Exception as e:
@@ -1654,7 +1677,7 @@ class Database:
             "cgc_audit_traces", "cgc_calibration_changelog", "cgc_error_reports", "cgc_feedback",
             "cgc_launch_checklist_items", "cgc_launch_errors", "cgc_launch_snapshot", "cgc_loop_decisions",
             "cgc_module_results", "cgc_prefilter_results", "cgc_saml_connections", "cgc_tenant_webhooks",
-            "cgc_tenant_weighting_overrides", "cgc_webhook_retry_queue",
+            "cgc_tenant_weighting_overrides", "cgc_tenant_action_policies", "cgc_webhook_retry_queue",
             "decision_modules", "decisions_2026_04", "decisions_2026_05", "decisions_2026_06",
             "pod_chain", "prefilter_results", "retention_log", "sessions", "tenants", "users",
         ]
@@ -3533,6 +3556,140 @@ class Database:
                 found = len(remaining) != len(rows)
                 if found:
                     self._write_json_list('tenant_weighting_overrides.json', remaining)
+                return found
+
+    # ======================================================================
+    # TENANT ACTION POLICIES (2026-09-15 -- item #3 of the AI-agent
+    # action-governance plan, after PreFilter's action_within_capabilities
+    # check and the circuit breaker: a per-tenant, per-action conditional
+    # policy layer. Capabilities (PreFilter CHECK 4B) are agent-level and
+    # code-defined; weighting overrides above change scoring, not whether
+    # an action runs at all. Neither lets a TENANT itself say "never let
+    # any agent take action X against my data" or "action X always needs a
+    # human" -- this table is that knob, self-service like weighting
+    # overrides above.
+    # ======================================================================
+    # One row per (app_source, action). `area`/`blocked_data_domains` are
+    # the "conditional" part: NULL/empty means the policy applies
+    # unconditionally to that action; a non-null area restricts it to that
+    # area only, and blocked_data_domains restricts it to requests whose
+    # data_domains intersect that set. See app/modules/guard/tenant_policy.py
+    # for the evaluation logic this table backs.
+
+    def _create_tenant_action_policies_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_tenant_action_policies (
+                        id                    BIGSERIAL PRIMARY KEY,
+                        app_source            VARCHAR(50) NOT NULL,
+                        action                VARCHAR(100) NOT NULL,
+                        policy_type           VARCHAR(30) NOT NULL,
+                        area                  VARCHAR(50),
+                        blocked_data_domains  TEXT[],
+                        reason                TEXT,
+                        active                BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_by            VARCHAR(255),
+                        created_at            TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at            TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        UNIQUE (app_source, action)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tenant_action_policies_lookup ON cgc_tenant_action_policies(app_source, action)")
+                logger.info("Tenant action policies schema ready")
+        except Exception as e:
+            logger.warning(f"_create_tenant_action_policies_schema failed (non-fatal): {e}")
+
+    def get_tenant_action_policy(self, app_source: str, action: str) -> Optional[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT * FROM cgc_tenant_action_policies
+                        WHERE app_source = %s AND action = %s AND active = TRUE
+                    """, (app_source, action))
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        else:
+            for r in self._read_json_list('tenant_action_policies.json'):
+                if r.get('app_source') == app_source and r.get('action') == action and r.get('active', True):
+                    return r
+            return None
+
+    def list_tenant_action_policies(self, app_source: str) -> List[Dict[str, Any]]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT * FROM cgc_tenant_action_policies
+                        WHERE app_source = %s ORDER BY action
+                    """, (app_source,))
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            rows = [r for r in self._read_json_list('tenant_action_policies.json') if r.get('app_source') == app_source]
+            rows.sort(key=lambda r: r.get('action', ''))
+            return rows
+
+    def set_tenant_action_policy(self, app_source: str, action: str, policy: Dict[str, Any], updated_by: Optional[str]) -> Dict[str, Any]:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_tenant_action_policies
+                            (app_source, action, policy_type, area, blocked_data_domains, reason, active, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s)
+                        ON CONFLICT (app_source, action) DO UPDATE SET
+                            policy_type = EXCLUDED.policy_type, area = EXCLUDED.area,
+                            blocked_data_domains = EXCLUDED.blocked_data_domains, reason = EXCLUDED.reason,
+                            active = TRUE, created_by = EXCLUDED.created_by, updated_at = NOW()
+                        RETURNING *
+                    """, (
+                        app_source, action, policy['policy_type'], policy.get('area'),
+                        policy.get('blocked_data_domains') or None, policy.get('reason'), updated_by,
+                    ))
+                    row = cur.fetchone()
+                    return dict(row) if row else {}
+        else:
+            with self.json_lock:
+                rows = self._read_json_list('tenant_action_policies.json')
+                now = datetime.now(timezone.utc).isoformat()
+                new_row = {
+                    'app_source': app_source, 'action': action,
+                    'policy_type': policy['policy_type'], 'area': policy.get('area'),
+                    'blocked_data_domains': policy.get('blocked_data_domains') or [],
+                    'reason': policy.get('reason'), 'active': True,
+                    'created_by': updated_by, 'updated_at': now,
+                }
+                for i, r in enumerate(rows):
+                    if r.get('app_source') == app_source and r.get('action') == action:
+                        new_row['created_at'] = r.get('created_at', now)
+                        rows[i] = new_row
+                        self._write_json_list('tenant_action_policies.json', rows)
+                        return new_row
+                new_row['created_at'] = now
+                rows.append(new_row)
+                self._write_json_list('tenant_action_policies.json', rows)
+                return new_row
+
+    def delete_tenant_action_policy(self, app_source: str, action: str) -> bool:
+        if self.use_postgres:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        DELETE FROM cgc_tenant_action_policies
+                        WHERE app_source = %s AND action = %s
+                    """, (app_source, action))
+                    return cur.rowcount > 0
+        else:
+            with self.json_lock:
+                rows = self._read_json_list('tenant_action_policies.json')
+                remaining = [r for r in rows if not (r.get('app_source') == app_source and r.get('action') == action)]
+                found = len(remaining) != len(rows)
+                if found:
+                    self._write_json_list('tenant_action_policies.json', remaining)
                 return found
 
     # ======================================================================
