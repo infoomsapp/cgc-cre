@@ -134,6 +134,7 @@ class PreFilterResult:
     complianceOwnerRequired: bool = False
     complianceOwnerPresent: bool = False
     sensitiveDomainsDetected: List[str] = None
+    actionWithinCapabilities: bool = True
 
     # Trace for audit
     checks: List[PreFilterCheck] = None
@@ -162,6 +163,7 @@ class PreFilterResult:
             "areaIdentified": self.areaIdentified,
             "sensitiveDomainsCount": self.sensitiveDomainsCount,
             "sensitiveDomainsDetected": self.sensitiveDomainsDetected or [],
+            "actionWithinCapabilities": self.actionWithinCapabilities,
             "checks": [c.to_dict() for c in self.checks] if self.checks else [],
             "latency_ms": self.latency_ms,
             "reason": self.reason,
@@ -212,15 +214,20 @@ class PreFilter:
     CGC_PreFilter - OPTIMIZED
     
     Responsibilities (ONLY):
-    1. Validate agent exists 
-    2. Check RBAC (user roles in agent roles) 
-    3. Validate scopes exist in agent 
-    4. Detect blocked domains 
-    5. Count sensitive domains 
-    6. Identify area 
-    7. Extract compliance owner requirement 
-    8. Pass pure data to SCM/Core 
-    
+    1. Validate agent exists
+    2. Check RBAC (user roles in agent roles)
+    3. Validate scopes exist in agent
+    4. Validate requested action is within agent's declared capabilities
+       (2026-09-15 -- the actual action-boundary enforcement point: scopes
+       gate what DATA an agent may touch, this gates what ACTIONS it may
+       take, and is deliberately independent of whether the request looks
+       plausible -- see CHECK 4B in evaluate() for the full reasoning)
+    5. Detect blocked domains
+    6. Count sensitive domains
+    7. Identify area
+    8. Extract compliance owner requirement
+    9. Pass pure data to SCM/Core
+
     NO business logic. NO weighting. NO policy decisions.
     """
 
@@ -336,6 +343,71 @@ class PreFilter:
             )
 
         # ====================================================================
+        # CHECK 4B: Action Within Agent Capabilities
+        # ====================================================================
+        check_start = time.time()
+        # 2026-09-15 audit follow-up: agent.capabilities has existed on the
+        # Agent dataclass since this module's creation (see its own class
+        # docstring example: capabilities=["transfer_funds",
+        # "approve_transactions"]) but was never actually validated against
+        # the requested action anywhere in this method -- an agent whose
+        # declared capabilities never included "transfer_funds" could still
+        # submit a request with action="transfer_funds" and pass every
+        # other check here (agent status, RBAC, scopes) as long as the
+        # calling user held the right role and the right scopes happened to
+        # exist on the agent. Scopes and capabilities are deliberately
+        # different axes: scopes describe what DATA an agent may touch
+        # (CHECK 4, above); capabilities describe what ACTIONS an agent may
+        # take. A research agent scoped to read customer records has no
+        # legitimate reason to ever submit a "transfer_funds" action, no
+        # matter how its scopes are configured -- and nothing before this
+        # check would have caught that.
+        #
+        # This is a real containment gap, not a hypothetical one: a
+        # manipulated or hijacked agent "looks healthy" on every other
+        # signal here (valid scopes, valid roles, no error raised anywhere)
+        # -- the only reliable signal is whether the specific action it's
+        # attempting was ever actually granted to it. This check
+        # deliberately does not attempt to judge the request's plausibility
+        # or infer intent (that is a fundamentally different, much harder
+        # problem no static allowlist check can solve) -- it is a hard
+        # boundary on unconditional list membership: either the action is
+        # in the agent's declared capability list, or the request is
+        # denied, regardless of why the action was attempted.
+        #
+        # CRITICAL SAFETY VALVE, found live before this ever shipped: the
+        # only real production call site (main.py's /governance/decision)
+        # has no real agent registry to draw from yet (confirmed via full
+        # repo search -- no DB table, no lookup class) and synthesizes a
+        # permissive per-request Agent with capabilities=[] every time.
+        # Enforcing unconditionally against that empty list would have
+        # DENIED EVERY governance decision in production, not just genuine
+        # violations -- a total outage, not a security improvement. An
+        # empty capabilities list is therefore treated the same way CHECK 4
+        # already treats an empty requested_scopes list: "nothing to
+        # restrict against" rather than "nothing is allowed". This makes
+        # enforcement opt-in per agent -- inert today (matching current
+        # production behavior exactly, zero risk to existing traffic),
+        # automatically active the moment any agent (from a real registry,
+        # once built, or a caller constructing one directly) has a
+        # non-empty capabilities list.
+        action_within_capabilities = (
+            not agent.capabilities or context.action in agent.capabilities
+        )
+        checks.append(PreFilterCheck(
+            check_name="action_within_capabilities",
+            passed=action_within_capabilities,
+            details=f"Action: {context.action}, Agent capabilities: {agent.capabilities}",
+            latency_ms=self._elapsed_ms(check_start),
+        ))
+
+        if not action_within_capabilities:
+            return self._create_deny_result(
+                trace_id, correlation_id, timestamp, checks, overall_start,
+                f"Action '{context.action}' not in agent capabilities {agent.capabilities}"
+            )
+
+        # ====================================================================
         # CHECK 5: Area Identification
         # ====================================================================
         check_start = time.time()
@@ -432,6 +504,7 @@ class PreFilter:
             agentStatus=agent.status,
             userRolesMatched=user_roles_matched,
             scopesValid=all_scopes_exist,
+            actionWithinCapabilities=action_within_capabilities,
             blockedDomainsDetected=False,
             blockedDomainName=None,
             complianceOwnerRequired=False,  #  SCM will check if required based on area
@@ -484,6 +557,7 @@ class PreFilter:
             agentStatus=None,
             userRolesMatched=False,
             scopesValid=False,
+            actionWithinCapabilities=False,
             blockedDomainsDetected=False,
             complianceOwnerRequired=False,
             complianceOwnerPresent=False,
