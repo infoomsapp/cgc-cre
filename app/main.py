@@ -1371,6 +1371,54 @@ async def delete_my_action_policy(
     return {"deleted": deleted}
 
 
+# Operator-scoped mirror of the three routes above (2026-09-16). Every
+# /tenants/my-apps/* write is gated by _owns_app_source(), which a
+# first-party app_source (ledgiproof, ledgiproof-tax-pro, controlmiles --
+# ALLOWED_APP_SOURCES) can structurally never satisfy: those callers
+# authenticate with the shared CGC_SERVICE_API_KEY, not a per-tenant key
+# (so user["app_source"] is never bound), AND /tenants/self-signup
+# explicitly refuses to issue a key for a reserved app_source. That left
+# no path at all -- self-service or admin -- to ever write a tenant
+# action policy for the operator's own products, only a raw DB call.
+# These three close that gap the same way _can_access_app_source already
+# closed it for the read-only reports/timeseries endpoints: an
+# admin-authenticated route with no ownership check, since an operator
+# managing policy for its own app_source (or, for support, a real
+# tenant's) is exactly what require_admin already exists to gate. Same
+# validation/rate-limit/DB calls as the self-service trio -- only the
+# authorization model differs -- so this is also the repeatable pattern
+# for the next first-party integration: no new mechanism to build, just
+# call these three with the new app_source.
+@app.get("/admin/tenants/{app_source}/action-policies", tags=["Admin"])
+async def list_tenant_action_policies_admin(app_source: str, user=Depends(require_admin)) -> Dict[str, Any]:
+    return {"policies": app.db.list_tenant_action_policies(app_source)}
+
+
+@app.put("/admin/tenants/{app_source}/action-policies/{action}", tags=["Admin"])
+async def set_tenant_action_policy_admin(
+    app_source: str, action: str, payload: TenantActionPolicyIn, user=Depends(require_admin),
+) -> Dict[str, Any]:
+    if not check_rate_limit(f"tenant_action_policy_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many policy changes — try again later")
+    _validate_tenant_action_policy(payload)
+
+    row = app.db.set_tenant_action_policy(
+        app_source, action, payload.model_dump(), updated_by=user["email"],
+    )
+    logger.info(f"[tenant_policy] policy set (admin): app_source={app_source} action={action} type={payload.policy_type} by={user['email']}")
+    return row
+
+
+@app.delete("/admin/tenants/{app_source}/action-policies/{action}", tags=["Admin"])
+async def delete_tenant_action_policy_admin(
+    app_source: str, action: str, user=Depends(require_admin),
+) -> Dict[str, Any]:
+    if not check_rate_limit(f"tenant_action_policy_write:{user['email']}", 20, 3600):
+        raise HTTPException(status_code=429, detail="Too many policy changes — try again later")
+    deleted = app.db.delete_tenant_action_policy(app_source, action)
+    return {"deleted": deleted}
+
+
 # Self-service, per-tenant kill switch (item #4 of the action-governance
 # plan). Same ownership model as everything else under /tenants/my-apps/
 # -- a tenant can only trip/clear their OWN app_source's switch. The
