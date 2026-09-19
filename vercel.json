@@ -5,5 +5,10 @@
       "path": "/health",
       "schedule": "*/10 * * * *"
     }
-  ]
+  ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 30
+    }
+  }
 }

@@ -267,6 +267,7 @@ function disconnect() {
   localStorage.removeItem('cgc_dash_token');
   TOKEN = '';
   if (timer) clearInterval(timer);
+  stopLiveErrorStream();
   document.getElementById('app').style.display = 'none';
   document.getElementById('gate').style.display = 'flex';
 }
@@ -506,6 +507,78 @@ async function bulkDeleteSelected() {
   } catch (e) {}
 }
 
+// ---- Live error stream (SSE via GET /monitor/errors/stream) ----
+// Explicit user request (2026-09-19): "que reciba info fresh momento a
+// momento, como lo hacen empresas enterprise" -- replaces waiting up to
+// 30s (the setInterval(refresh, 30000) below) for a new error to show up
+// with a near-instant nudge. Deliberately NOT parsed into incremental DOM
+// patches -- refresh() already renders the full table correctly
+// (checkboxes, pills, stats, guard charts), so a new event just triggers
+// that same proven render path immediately instead of duplicating its
+// logic here with its own risk of drifting out of sync. The 30s poll
+// below stays as-is, untouched, as a safety net for whatever this stream
+// misses (a dropped connection, a reconnect gap).
+//
+// Native EventSource can't send a custom Authorization header, so this
+// uses fetch() + a manual reader instead, parsing the same
+// "data: ...\n\n" wire format by hand.
+let streamAbortController = null;
+let streamRefreshDebounceId = null;
+
+function scheduleStreamRefresh() {
+  if (streamRefreshDebounceId) return;
+  streamRefreshDebounceId = setTimeout(() => {
+    streamRefreshDebounceId = null;
+    refresh();
+  }, 500);
+}
+
+function stopLiveErrorStream() {
+  if (streamAbortController) {
+    streamAbortController.abort();
+    streamAbortController = null;
+  }
+}
+
+async function startLiveErrorStream() {
+  const myController = new AbortController();
+  streamAbortController = myController;
+
+  try {
+    const r = await fetch(API + '/monitor/errors/stream', {
+      headers: { 'Authorization': 'Bearer ' + TOKEN },
+      signal: myController.signal,
+    });
+    if (!r.ok || !r.body) throw new Error('stream HTTP ' + r.status);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() ?? ''; // keep the trailing partial chunk
+      for (const evt of events) {
+        if (evt.startsWith('data:')) scheduleStreamRefresh();
+      }
+    }
+  } catch (e) {
+    if (myController.signal.aborted) return; // disconnect() -- don't reconnect
+  }
+
+  // The server self-closes every ~25s by design (see monitor.py's own
+  // comment on why) -- a closed stream here is the expected, normal case,
+  // not a failure to log or surface. Reconnect only if still logged in
+  // and this is still the active stream (a stale closure from a PREVIOUS
+  // startLiveErrorStream() call, e.g. right after disconnect()+boot(),
+  // must not also reconnect and end up with two streams running).
+  if (TOKEN && streamAbortController === myController) {
+    setTimeout(() => { if (TOKEN) startLiveErrorStream(); }, 1500);
+  }
+}
+
 async function boot() {
   document.getElementById('gate').style.display = 'none';
   document.getElementById('app').style.display = 'block';
@@ -519,6 +592,7 @@ async function boot() {
   }
   refresh();
   timer = setInterval(refresh, 30000);
+  startLiveErrorStream();
 }
 
 if (TOKEN) boot();

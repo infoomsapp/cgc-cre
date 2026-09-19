@@ -2627,6 +2627,38 @@ class Database:
             reports.sort(key=lambda r: r.get('last_seen', ''), reverse=True)
             return reports[:limit]
 
+    def get_error_reports_since(
+        self, since: datetime, app_source: Optional[str] = None, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """New sibling to get_error_reports, not a rewrite of it -- built
+        for /monitor/errors/stream's SSE polling loop (2026-09-19), which
+        needs "anything new since this exact timestamp" on a tight ~1.5s
+        cadence, not the day-granularity `since_days` filter the existing
+        method already serves its own callers with. Ascending order on
+        purpose (oldest-of-the-new-batch first), so a stream consumer sees
+        events in the order they actually happened."""
+        if self.use_postgres:
+            clauses, params = ["last_seen > %s"], [since]
+            if app_source is not None:
+                clauses.append("app_source = %s"); params.append(app_source)
+            where = f"WHERE {' AND '.join(clauses)}"
+            params.append(limit)
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(f"""
+                        SELECT * FROM cgc_error_reports {where}
+                        ORDER BY last_seen ASC LIMIT %s
+                    """, params)
+                    return [dict(row) for row in cur.fetchall()]
+        else:
+            since_iso = since.isoformat()
+            reports = self._read_json_list('error_reports.json')
+            reports = [r for r in reports if r.get('last_seen', '') > since_iso]
+            if app_source is not None:
+                reports = [r for r in reports if r.get('app_source') == app_source]
+            reports.sort(key=lambda r: r.get('last_seen', ''))
+            return reports[:limit]
+
     def get_error_stats(self, days: int = 7, app_source: Optional[str] = None) -> Dict[str, Any]:
         reports = self.get_error_reports(app_source=app_source, since_days=days, limit=100000)
         by_app: Dict[str, int] = {}

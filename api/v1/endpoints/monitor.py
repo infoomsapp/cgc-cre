@@ -2,6 +2,7 @@
 POST /monitor/error                     — ingest a client error report (LedgiProof / LTP)
 GET  /monitor/errors                    — list recent reports
 GET  /monitor/errors/stats              — aggregated stats
+GET  /monitor/errors/stream             — SSE stream of new reports (2026-09-19)
 POST /monitor/errors/{fingerprint}/resolve — mark a report resolved
 
 This is plain application-crash telemetry (frontend JS errors / unhandled
@@ -14,10 +15,15 @@ so this file has no auth logic of its own.
 """
 
 import os
+import json
+import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.Core.db.database import get_database
@@ -176,6 +182,97 @@ async def delete_error(fingerprint: str, request: Request) -> Dict[str, Any]:
     if not ok:
         raise HTTPException(status_code=404, detail="No error report with that fingerprint")
     return {"deleted": True, "fingerprint": fingerprint}
+
+
+# =========================================================
+# LIVE STREAM (SSE) -- replaces the security dashboard's 30s
+# setInterval(refresh, 30000) poll (2026-09-19, explicit user request:
+# "que reciba info fresh momento a momento, como lo hacen empresas
+# enterprise").
+#
+# Honest about what this actually is: Vercel's Python functions are
+# stateless serverless invocations, not a long-running process an
+# in-memory pub/sub could hook into (a new error saved by ONE
+# invocation is invisible to any other invocation's in-memory state).
+# So this is still polling underneath -- just moved server-side, on a
+# ~1.5s cadence instead of the browser's 30s one, and pushed down one
+# already-open connection instead of a fresh HTTP request (with a fresh
+# auth check and DB round trip for the FULL list) every single time.
+# That is the real, honest improvement: ~20x lower latency and far
+# fewer redundant full-list fetches, not a magic elimination of polling
+# itself -- true push (no polling anywhere) would need a persistent
+# backend process or a managed pub/sub service neither Vercel's
+# serverless model nor this project's current scale calls for.
+#
+# Self-closes after _STREAM_MAX_SECONDS rather than trusting Vercel's
+# function-duration limit to be any particular value (Hobby/Pro/Fluid
+# Compute all differ, and it can change from under this code) --
+# dashboard_security.html's client reconnects transparently, so a
+# viewer never sees more than a ~1.5s gap even across reconnects.
+_STREAM_POLL_SECONDS = 1.5
+_STREAM_MAX_SECONDS = 25
+_STREAM_KEEPALIVE_EVERY = 15  # seconds of silence before a comment ping
+
+
+async def _error_stream_generator(app_source: Optional[str]):
+    db = get_database()
+    cursor = datetime.now(timezone.utc)
+    started = asyncio.get_event_loop().time()
+    last_keepalive = started
+
+    # First byte ASAP so the browser's fetch() reader resolves immediately
+    # instead of looking hung during the first poll tick.
+    yield ": connected\n\n"
+
+    while True:
+        now = asyncio.get_event_loop().time()
+        if now - started >= _STREAM_MAX_SECONDS:
+            yield ": closing (max stream duration reached, client will reconnect)\n\n"
+            return
+
+        try:
+            new_reports = db.get_error_reports_since(cursor, app_source=app_source, limit=50)
+        except Exception as exc:
+            logger.warning(f"[monitor] stream poll failed (non-fatal, will retry): {exc}")
+            new_reports = []
+
+        if new_reports:
+            for report in new_reports:
+                payload = jsonable_encoder(report)
+                yield f"data: {json.dumps(payload)}\n\n"
+            # Advance the cursor off the newest row's own last_seen, not
+            # wall-clock time -- keeps this correct even if a poll tick
+            # runs long for some reason.
+            newest = new_reports[-1].get("last_seen")
+            if newest:
+                cursor = newest if isinstance(newest, datetime) else datetime.fromisoformat(str(newest))
+            last_keepalive = now
+        elif now - last_keepalive >= _STREAM_KEEPALIVE_EVERY:
+            # Keeps proxies/load balancers from deciding an idle connection
+            # is dead and closing it out from under us.
+            yield ": keep-alive\n\n"
+            last_keepalive = now
+
+        await asyncio.sleep(_STREAM_POLL_SECONDS)
+
+
+@router.get("/errors/stream", summary="Server-Sent Events stream of new error reports")
+async def stream_errors(request: Request, app_source: Optional[str] = Query(None)) -> StreamingResponse:
+    # Same per-tenant scoping as list_errors/error_stats above.
+    bound_app_source = _bound_app_source(request)
+    effective_app_source = bound_app_source or app_source
+
+    return StreamingResponse(
+        _error_stream_generator(effective_app_source),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Nginx-in-front-of-Vercel (or any intermediary) buffering this
+            # would defeat the entire point -- force it off explicitly.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 class BulkDeleteIn(BaseModel):
