@@ -3985,6 +3985,297 @@ class Database:
     # reason. A flat table with its own idempotent CREATE TABLE IF NOT
     # EXISTS and no DROP is immune to that.
 
+    # ==========================================================================
+    # CGC CORE KEYS -- centralized signing-key custody service (2026-09-19,
+    # explicit user request: move PoD's RSA signing key off a plain env var
+    # onto real KMS-backed custody, exposed as its own named subsystem other
+    # Olimsys apps can eventually call, not just a private detail of PoD).
+    #
+    # Two tables:
+    #   - key_registry: which LOGICAL key alias (e.g. "pod-default",
+    #     "pod-banking-high") maps to which real AWS KMS key ARN. Callers
+    #     never see or handle a raw private key -- they ask this service to
+    #     sign/verify against an alias, and the alias->ARN mapping is the
+    #     only thing that ever changes if a key is rotated or a new
+    #     per-area/per-tenant key is issued later (a data change, not a
+    #     code change in every caller).
+    #   - usage_log: append-only (same pattern as cgc_pod.pod_ledger) record
+    #     of every sign/get-public-key call -- which alias, which caller
+    #     service, which tenant/decision if applicable, success/failure.
+    #     This is the answer to "prove nobody used this key you don't know
+    #     about" that a raw env-var-held key could never give an auditor.
+    # ==========================================================================
+
+    def _create_keys_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_keys")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_keys.key_registry (
+                        key_alias           TEXT PRIMARY KEY,
+                        app_source          TEXT NOT NULL,
+                        area                TEXT,
+                        purpose             TEXT NOT NULL DEFAULT 'signing',
+                        kms_key_arn         TEXT NOT NULL,
+                        kms_region          TEXT NOT NULL,
+                        signing_algorithm   TEXT NOT NULL DEFAULT 'RSASSA_PSS_SHA_256',
+                        status              TEXT NOT NULL DEFAULT 'active',
+                        created_by          TEXT,
+                        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        retired_at          TIMESTAMPTZ
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_key_registry_app_source ON cgc_keys.key_registry(app_source)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_keys.usage_log (
+                        id              BIGSERIAL PRIMARY KEY,
+                        key_alias       TEXT NOT NULL,
+                        operation       TEXT NOT NULL,
+                        caller_service  TEXT NOT NULL,
+                        tenant_id       TEXT,
+                        decision_id     TEXT,
+                        success         BOOLEAN NOT NULL,
+                        error_message   TEXT,
+                        latency_ms      NUMERIC,
+                        requested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_keys_usage_alias_time ON cgc_keys.usage_log(key_alias, requested_at)")
+
+                # Append-only, same trigger-based enforcement as
+                # cgc_pod.pod_ledger (see that method's own comment for why
+                # a trigger and not a RULE) -- a usage log that could be
+                # edited or deleted after the fact isn't an audit trail.
+                cur.execute("""
+                    DO $do$
+                    BEGIN
+                        CREATE OR REPLACE FUNCTION cgc_keys.prevent_usage_log_mutation()
+                        RETURNS TRIGGER AS $func$
+                        BEGIN
+                            RAISE EXCEPTION 'cgc_keys.usage_log is append-only: % not permitted', TG_OP;
+                        END;
+                        $func$ LANGUAGE plpgsql
+                        SET search_path = cgc_keys, public, pg_temp;
+
+                        DROP TRIGGER IF EXISTS usage_log_append_only ON cgc_keys.usage_log;
+                        CREATE TRIGGER usage_log_append_only
+                        BEFORE UPDATE OR DELETE ON cgc_keys.usage_log
+                        FOR EACH ROW EXECUTE FUNCTION cgc_keys.prevent_usage_log_mutation();
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            RAISE WARNING 'cgc_keys.usage_log append-only trigger setup failed (non-fatal): %', SQLERRM;
+                    END $do$;
+                """)
+
+                logger.info("cgc_keys schema ready")
+        except Exception as e:
+            logger.warning(f"_create_keys_schema failed (non-fatal): {e}")
+
+    def get_key_registry_entry(self, key_alias: str) -> Optional[Dict[str, Any]]:
+        """Resolves a logical key alias to its KMS ARN/region/algorithm.
+        Returns None for an unregistered alias or an alias whose status
+        isn't 'active' (a retired key should behave as if it doesn't
+        exist to any new caller -- see retire_key_registry_entry)."""
+        if not self.use_postgres:
+            return None
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM cgc_keys.key_registry WHERE key_alias = %s AND status = 'active'",
+                    (key_alias,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def list_key_registry(self, app_source: Optional[str] = None) -> List[Dict[str, Any]]:
+        if not self.use_postgres:
+            return []
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if app_source:
+                    cur.execute(
+                        "SELECT * FROM cgc_keys.key_registry WHERE app_source = %s ORDER BY created_at",
+                        (app_source,),
+                    )
+                else:
+                    cur.execute("SELECT * FROM cgc_keys.key_registry ORDER BY created_at")
+                return [dict(row) for row in cur.fetchall()]
+
+    def register_key(
+        self, key_alias: str, app_source: str, kms_key_arn: str, kms_region: str,
+        area: Optional[str] = None, purpose: str = "signing",
+        signing_algorithm: str = "RSASSA_PSS_SHA_256", created_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Registers a new logical key alias -> KMS ARN mapping, or
+        reactivates/updates an existing alias (ON CONFLICT). Does NOT talk
+        to AWS itself -- the KMS key must already exist; this only records
+        which alias points at it. See router: POST /keys/registry."""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    INSERT INTO cgc_keys.key_registry
+                        (key_alias, app_source, area, purpose, kms_key_arn, kms_region, signing_algorithm, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (key_alias) DO UPDATE SET
+                        kms_key_arn = EXCLUDED.kms_key_arn,
+                        kms_region = EXCLUDED.kms_region,
+                        signing_algorithm = EXCLUDED.signing_algorithm,
+                        status = 'active',
+                        retired_at = NULL
+                    RETURNING *
+                """, (key_alias, app_source, area, purpose, kms_key_arn, kms_region, signing_algorithm, created_by))
+                return dict(cur.fetchone())
+
+    def retire_key_registry_entry(self, key_alias: str) -> bool:
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE cgc_keys.key_registry SET status = 'retired', retired_at = NOW() WHERE key_alias = %s AND status = 'active'",
+                    (key_alias,),
+                )
+                return cur.rowcount > 0
+
+    def log_key_usage(
+        self, key_alias: str, operation: str, caller_service: str, success: bool,
+        tenant_id: Optional[str] = None, decision_id: Optional[str] = None,
+        error_message: Optional[str] = None, latency_ms: Optional[float] = None,
+    ) -> None:
+        """Best-effort: a logging failure must never block the actual sign
+        operation it's trying to record (same non-fatal convention as every
+        other audit-adjacent write in this codebase)."""
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO cgc_keys.usage_log
+                            (key_alias, operation, caller_service, tenant_id, decision_id, success, error_message, latency_ms)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (key_alias, operation, caller_service, tenant_id, decision_id, success, error_message, latency_ms))
+        except Exception as e:
+            logger.warning(f"log_key_usage failed (non-fatal): {e}")
+
+    def list_key_usage_log(self, key_alias: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        if not self.use_postgres:
+            return []
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if key_alias:
+                    cur.execute(
+                        "SELECT * FROM cgc_keys.usage_log WHERE key_alias = %s ORDER BY requested_at DESC LIMIT %s",
+                        (key_alias, limit),
+                    )
+                else:
+                    cur.execute("SELECT * FROM cgc_keys.usage_log ORDER BY requested_at DESC LIMIT %s", (limit,))
+                return [dict(row) for row in cur.fetchall()]
+
+    # ==========================================================================
+    # SITE ANALYTICS -- real-time pageview tracking for Olimsys marketing/
+    # web-app sites (2026-09-21, explicit user request, starting with
+    # controlmiles.com, ledgiproof.com to follow). Deliberately NOT reusing
+    # cgc_pod/cgc_tco/etc.'s append-only-trigger pattern here: those exist
+    # because a decision/audit record must be provably tamper-evident for a
+    # compliance reader; a pageview count has no such evidentiary weight, and
+    # forcing append-only would block the one legitimate mutation this data
+    # ever needs (a retention-driven cleanup job deleting rows older than N
+    # days, which a real analytics table needs and a governance ledger never
+    # should).
+    # ==========================================================================
+
+    def _create_analytics_schema(self):
+        if not self.use_postgres:
+            return
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("CREATE SCHEMA IF NOT EXISTS cgc_analytics")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cgc_analytics.pageviews (
+                        id              BIGSERIAL PRIMARY KEY,
+                        site            TEXT NOT NULL,
+                        path            TEXT NOT NULL,
+                        referrer        TEXT,
+                        session_id      TEXT NOT NULL,
+                        country         TEXT,
+                        user_agent      TEXT,
+                        viewed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_pageviews_site_time ON cgc_analytics.pageviews(site, viewed_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_pageviews_session ON cgc_analytics.pageviews(session_id, viewed_at)")
+
+                logger.info("cgc_analytics schema ready")
+        except Exception as e:
+            logger.warning(f"_create_analytics_schema failed (non-fatal): {e}")
+
+    def record_pageview(
+        self, site: str, path: str, session_id: str,
+        referrer: Optional[str] = None, country: Optional[str] = None, user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.use_postgres:
+            return {}
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    INSERT INTO cgc_analytics.pageviews (site, path, referrer, session_id, country, user_agent)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id, site, path, session_id, country, viewed_at
+                """, (site, path, referrer, session_id, country, user_agent))
+                return dict(cur.fetchone())
+
+    def get_pageviews_since(self, site: str, since: datetime, limit: int = 200) -> List[Dict[str, Any]]:
+        """Sibling to Database.get_error_reports_since -- same "what's new
+        since this exact timestamp" shape, reused by analytics.py's SSE
+        stream for the same tight-polling reason (see monitor.py's stream
+        generator for the full honest explanation of why this is still
+        polling underneath, just server-side and fast)."""
+        if not self.use_postgres:
+            return []
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT * FROM cgc_analytics.pageviews
+                    WHERE site = %s AND viewed_at > %s
+                    ORDER BY viewed_at ASC LIMIT %s
+                """, (site, since, limit))
+                return [dict(row) for row in cur.fetchall()]
+
+    def get_analytics_summary(self, site: str, active_window_minutes: int = 5, top_paths_hours: int = 24) -> Dict[str, Any]:
+        if not self.use_postgres:
+            return {"active_visitors": 0, "top_paths": [], "total_today": 0}
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT COUNT(DISTINCT session_id) AS active_visitors
+                    FROM cgc_analytics.pageviews
+                    WHERE site = %s AND viewed_at > NOW() - (%s || ' minutes')::interval
+                """, (site, active_window_minutes))
+                active_visitors = cur.fetchone()["active_visitors"]
+
+                cur.execute("""
+                    SELECT path, COUNT(*) AS views
+                    FROM cgc_analytics.pageviews
+                    WHERE site = %s AND viewed_at > NOW() - (%s || ' hours')::interval
+                    GROUP BY path ORDER BY views DESC LIMIT 10
+                """, (site, top_paths_hours))
+                top_paths = [dict(row) for row in cur.fetchall()]
+
+                cur.execute("""
+                    SELECT COUNT(*) AS total_today
+                    FROM cgc_analytics.pageviews
+                    WHERE site = %s AND viewed_at > date_trunc('day', NOW())
+                """, (site,))
+                total_today = cur.fetchone()["total_today"]
+
+                return {"active_visitors": active_visitors, "top_paths": top_paths, "total_today": total_today}
+
     def _create_calibration_changelog_schema(self):
         if not self.use_postgres:
             return

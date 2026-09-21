@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CGC Core — Dashboard</title>
+<title>CGC Core — Analytics</title>
 <link rel="icon" type="image/png" sizes="32x32" href="/static/img/cgc_favicon_32.png">
 <link rel="icon" type="image/png" sizes="64x64" href="/static/img/cgc_favicon_64.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/img/cgc_favicon_180.png">
@@ -18,9 +18,7 @@
     --accent: #4fd8a8;
     --accent-dim: rgba(79,216,168,0.12);
     --red: #ea8a78;
-    --red-bg: rgba(234,138,120,0.12);
     --amber: #e8b454;
-    --amber-bg: rgba(232,180,84,0.12);
     --green: #4ed892;
     --green-bg: rgba(78,216,146,0.12);
     --mono: ui-monospace, "SF Mono", Consolas, monospace;
@@ -62,20 +60,15 @@
   .brandRow { display: flex; align-items: center; gap: 9px; }
   .brandIcon { width: 24px; height: 24px; display: block; flex-shrink: 0; }
   #app { display: none; max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; }
-  header.top {
-    display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
-  }
+  header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   header.top h1 { font-size: 15px; margin: 0; letter-spacing: 0.02em; }
   header.top .sub { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
   header.top .right { display: flex; align-items: center; gap: 10px; }
   #dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
   .logout { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; }
 
-  .topnav { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
-  .topnav a {
-    color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 700;
-    padding: 6px 12px; border-radius: 6px; letter-spacing: 0.02em;
-  }
+  .topnav { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; flex-wrap: wrap; }
+  .topnav a { color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 6px; letter-spacing: 0.02em; }
   .topnav a:hover { color: var(--text); background: var(--panel-2); }
   .topnav a.active { color: #04140e; background: var(--accent); }
 
@@ -83,30 +76,26 @@
   .cards .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .cards .card .n { font-family: var(--mono); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .cards .card .l { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+  .cards .card.live .n { color: var(--accent); }
 
   section { margin-bottom: 24px; }
   section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+  .sectionhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .sectionhead h2 { margin: 0; }
 
-  .hubCards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 16px; margin-bottom: 28px; }
-  .hubCard {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 22px 20px; text-decoration: none; color: var(--text); display: block;
-    transition: border-color 0.15s;
-  }
-  .hubCard:hover { border-color: var(--accent); }
-  .hubCard .hc-dot { width: 8px; height: 8px; border-radius: 50%; margin-bottom: 14px; }
-  .hubCard.governance .hc-dot { background: var(--accent); }
-  .hubCard.scoring .hc-dot { background: var(--amber); }
-  .hubCard.security .hc-dot { background: var(--red); }
-  .hubCard .hc-title { font-size: 15px; font-weight: 700; margin-bottom: 6px; letter-spacing: 0.01em; }
-  .hubCard .hc-desc { color: var(--muted); font-size: 12px; line-height: 1.5; }
-
-  .modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap: 8px; }
-  .mod { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; }
-  .mod .m-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
-  .mod .m-dot.off { background: var(--red); }
-  .mod .m-name { font-family: var(--mono); font-size: 11.5px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .tablewrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border); }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px; white-space: nowrap; }
+  th { color: var(--muted); text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.04em; background: var(--panel-2); }
+  td.path { white-space: normal; max-width: 420px; font-family: var(--mono); font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  tr.fresh { animation: flash 1.6s ease-out; }
+  @keyframes flash { from { background: var(--accent-dim); } to { background: transparent; } }
   .empty { color: var(--muted); font-size: 12.5px; padding: 20px; text-align: center; }
+  select#siteSelect {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: var(--mono);
+  }
 </style>
 </head>
 <body>
@@ -114,6 +103,8 @@
 <div id="gate">
   <img src="/static/img/cgc_logo.png" alt="CGC Core" class="gateLogo">
   <div class="card">
+    <h1>CGC Core — Analytics</h1>
+    <p>Sign in to view real-time site traffic.</p>
     <form id="loginForm">
       <input id="emailInput" type="email" placeholder="Email" autocomplete="username" required>
       <input id="passwordInput" type="password" placeholder="Password" autocomplete="current-password" required>
@@ -134,7 +125,7 @@
     <div class="brandRow">
       <img src="/static/img/cgc_icon.png" alt="" class="brandIcon">
       <div>
-        <h1>CGC Core</h1>
+        <h1>CGC Core — Analytics</h1>
         <div class="sub">cgc-cre.vercel.app</div>
       </div>
     </div>
@@ -146,36 +137,47 @@
   </header>
 
   <nav class="topnav">
-    <a href="/dashboard" class="active">Home</a>
+    <a href="/dashboard">Home</a>
     <a href="/dashboard/governance">Governance</a>
     <a href="/dashboard/scoring">Scoring</a>
     <a href="/dashboard/security">Security</a>
-    <a href="/dashboard/analytics">Analytics</a>
+    <a href="/dashboard/analytics" class="active">Analytics</a>
     <a href="/dashboard/tenants">Tenants</a>
     <a href="/dashboard/launch-readiness">Launch Readiness</a>
   </nav>
 
-  <div class="hubCards">
-    <a class="hubCard governance" href="/dashboard/governance">
-      <div class="hc-dot"></div>
-      <div class="hc-title">Governance</div>
-      <div class="hc-desc">Module status and audited decision reports (PDF).</div>
-    </a>
-    <a class="hubCard scoring" href="/dashboard/scoring">
-      <div class="hc-dot"></div>
-      <div class="hc-title">Scoring</div>
-      <div class="hc-desc">Business flow scoring — approval drift, velocity, sensitivity, volatility.</div>
-    </a>
-    <a class="hubCard security" href="/dashboard/security">
-      <div class="hc-dot"></div>
-      <div class="hc-title">Security</div>
-      <div class="hc-desc">Guard activity (rate limits, credential-stuffing, payloads, internal flags) and error telemetry.</div>
-    </a>
+  <div class="sectionhead">
+    <h2>Site</h2>
+    <select id="siteSelect" onchange="switchSite(this.value)">
+      <option value="controlmiles.com">controlmiles.com</option>
+    </select>
   </div>
 
   <section>
-    <h2>System Health</h2>
-    <div class="modgrid" id="modGrid"></div>
+    <div class="cards" id="statCards">
+      <div class="card live"><div class="n" id="activeCount">—</div><div class="l">Active now (5 min)</div></div>
+      <div class="card"><div class="n" id="todayCount">—</div><div class="l">Views today</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Top Pages (24h)</h2>
+    <div class="tablewrap">
+      <table id="topPathsTable">
+        <thead><tr><th>Path</th><th>Views</th></tr></thead>
+        <tbody id="topPathsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Live Feed</h2>
+    <div class="tablewrap">
+      <table id="feedTable">
+        <thead><tr><th>Path</th><th>Referrer</th><th>Country</th><th>When</th></tr></thead>
+        <tbody id="feedBody"></tbody>
+      </table>
+    </div>
   </section>
 </div>
 
@@ -183,6 +185,8 @@
 const API = window.location.origin;
 let TOKEN = localStorage.getItem('cgc_dash_token') || '';
 let timer = null;
+let currentSite = 'controlmiles.com';
+const FEED_MAX_ROWS = 40;
 
 async function connectWithPassword(e) {
   e.preventDefault();
@@ -221,6 +225,7 @@ function disconnect() {
   localStorage.removeItem('cgc_dash_token');
   TOKEN = '';
   if (timer) clearInterval(timer);
+  stopLiveStream();
   document.getElementById('app').style.display = 'none';
   document.getElementById('gate').style.display = 'flex';
 }
@@ -235,18 +240,26 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function switchSite(site) {
+  currentSite = site;
+  stopLiveStream();
+  document.getElementById('feedBody').innerHTML = '';
+  refresh();
+  startLiveStream();
+}
+
 async function refresh() {
   try {
-    const nodes = await api('/status/nodes');
+    const summary = await api('/analytics/summary?site=' + encodeURIComponent(currentSite));
+    document.getElementById('activeCount').textContent = summary.active_visitors ?? 0;
+    document.getElementById('todayCount').textContent = summary.total_today ?? 0;
+
+    const rows = summary.top_paths || [];
+    document.getElementById('topPathsBody').innerHTML = rows.length ? rows.map(r => `
+      <tr><td class="path">${esc(r.path)}</td><td>${esc(r.views)}</td></tr>
+    `).join('') : `<tr><td colspan="2" class="empty">No pageviews yet</td></tr>`;
+
     document.getElementById('dot').style.background = 'var(--green)';
-    document.getElementById('gateErr').textContent = '';
-
-    const mods = nodes.nodes || {};
-    document.getElementById('modGrid').innerHTML = Object.keys(mods).map(k => {
-      const active = mods[k] && (mods[k].status === 'active' || mods[k].status === 'ACTIVE' || mods[k].total_evaluations !== undefined);
-      return `<div class="mod"><span class="m-dot ${active ? '' : 'off'}"></span><span class="m-name">${esc(k)}</span></div>`;
-    }).join('') || '<div class="empty">No module data</div>';
-
     document.getElementById('lastRefresh').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('dot').style.background = 'var(--red)';
@@ -254,11 +267,86 @@ async function refresh() {
   }
 }
 
+// ---- Live feed (SSE via GET /analytics/stream) ----
+// Same fetch()+manual-reader approach as dashboard_security.html's
+// startLiveErrorStream, for the same reason: native EventSource can't
+// send the Authorization header this endpoint requires. See that file's
+// own comment for the full explanation of the self-closing/reconnect
+// design -- not repeated here.
+let streamAbortController = null;
+
+function stopLiveStream() {
+  if (streamAbortController) {
+    streamAbortController.abort();
+    streamAbortController = null;
+  }
+}
+
+function prependFeedRow(view) {
+  const tbody = document.getElementById('feedBody');
+  if (tbody.querySelector('.empty')) tbody.innerHTML = '';
+  const tr = document.createElement('tr');
+  tr.className = 'fresh';
+  const when = view.viewed_at ? new Date(view.viewed_at).toLocaleTimeString() : '';
+  tr.innerHTML = `
+    <td class="path">${esc(view.path)}</td>
+    <td>${esc(view.referrer || '—')}</td>
+    <td>${esc(view.country || '—')}</td>
+    <td>${esc(when)}</td>
+  `;
+  tbody.insertBefore(tr, tbody.firstChild);
+  while (tbody.rows.length > FEED_MAX_ROWS) tbody.deleteRow(tbody.rows.length - 1);
+}
+
+async function startLiveStream() {
+  const myController = new AbortController();
+  streamAbortController = myController;
+  const site = currentSite;
+
+  try {
+    const r = await fetch(API + '/analytics/stream?site=' + encodeURIComponent(site), {
+      headers: { 'Authorization': 'Bearer ' + TOKEN },
+      signal: myController.signal,
+    });
+    if (!r.ok || !r.body) throw new Error('stream HTTP ' + r.status);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() ?? '';
+      for (const evt of events) {
+        if (!evt.startsWith('data:')) continue;
+        try {
+          const view = JSON.parse(evt.slice(5).trim());
+          prependFeedRow(view);
+          if (site === currentSite) {
+            const el = document.getElementById('activeCount');
+            // Cheap optimistic bump; the next /summary poll corrects it
+            // to the real distinct-session count.
+            el.textContent = (parseInt(el.textContent, 10) || 0) + 0;
+          }
+        } catch (e) { /* ignore malformed event */ }
+      }
+    }
+  } catch (e) {
+    if (myController.signal.aborted) return;
+  }
+
+  if (TOKEN && streamAbortController === myController) {
+    setTimeout(() => { if (TOKEN && currentSite === site) startLiveStream(); }, 1500);
+  }
+}
+
 async function boot() {
   document.getElementById('gate').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   try {
-    await api('/status/nodes');
+    await api('/analytics/summary?site=' + encodeURIComponent(currentSite));
   } catch (e) {
     document.getElementById('app').style.display = 'none';
     document.getElementById('gate').style.display = 'flex';
@@ -267,6 +355,7 @@ async function boot() {
   }
   refresh();
   timer = setInterval(refresh, 30000);
+  startLiveStream();
 }
 
 if (TOKEN) boot();

@@ -19,6 +19,7 @@ from typing import Annotated, Any, Final, Optional, Dict, List
 from time import perf_counter_ns
 
 from fastapi import FastAPI, Depends, Request, Header, status, Form, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, Response, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, ConfigDict
@@ -51,6 +52,9 @@ from api.v1.endpoints.verify import router as verify_router
 
 # Application monitoring router (LedgiProof + LedgiProof Tax Pro client error reports).
 from api.v1.endpoints.monitor import router as monitor_router, ALLOWED_APP_SOURCES
+
+# Site analytics router (real-time pageview tracking, controlmiles.com first).
+from api.v1.endpoints.analytics import router as analytics_router
 
 # Launch-readiness router (Play Store / App Store submission tracking) --
 # manual checklist + automated repo/Supabase-advisor signals, per app_source.
@@ -200,6 +204,30 @@ app = CGCCoreEngine(
     redoc_url="/redoc"
 )
 
+# CORS (2026-09-21, explicit user request: live pageview analytics for
+# controlmiles.com, later ledgiproof.com). Nothing before this needed
+# browser CORS at all -- every existing caller is server-to-server
+# (Supabase edge functions, the mobile app's own backend calls), never a
+# page's own JS making a fetch() from the visitor's browser. The new
+# public pageview beacon (api/v1/endpoints/analytics.py) is the first
+# endpoint a browser calls directly, from an origin that must be
+# explicitly allowlisted -- no wildcard, since this list is also what
+# permits credentialed-adjacent browser access to this API going forward.
+# Add each site's real origin here (and its www. variant) as it's wired
+# up; localhost stays for local dev against a deployed CGC Core instance.
+_ANALYTICS_ALLOWED_ORIGINS = [
+    "https://controlmiles.com",
+    "https://www.controlmiles.com",
+    "http://localhost:3000",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ANALYTICS_ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
 # Mount the forensic verify router → /verify/{decision_id} and /verify/chain/integrity
 app.include_router(verify_router, prefix="/verify", tags=["Forensic Audit"])
 
@@ -247,6 +275,14 @@ app.include_router(
     monitor_router, prefix="/monitor", tags=["Monitoring"],
     dependencies=[Depends(get_current_user)]
 )
+
+# Mount the site-analytics router → /analytics/pageview (public beacon),
+# /analytics/summary, /analytics/stream (admin/service only). NO router-
+# level dependency here, unlike monitor.py above -- analytics.py's own
+# POST /pageview must stay reachable by an anonymous visitor's browser;
+# see that file's own header comment for the per-route auth this uses
+# instead.
+app.include_router(analytics_router, prefix="/analytics", tags=["Analytics"])
 
 # Mount the launch-readiness router → /launch-readiness/{app_source}/...
 # Same auth bar as monitor.py -- see launch_readiness.py's own header
@@ -1848,6 +1884,7 @@ _DASHBOARD_HOME_HTML = (Path(__file__).parent / "static" / "dashboard_home.html"
 _DASHBOARD_GOVERNANCE_HTML = (Path(__file__).parent / "static" / "dashboard_governance.html").read_text(encoding="utf-8")
 _DASHBOARD_SCORING_HTML = (Path(__file__).parent / "static" / "dashboard_scoring.html").read_text(encoding="utf-8")
 _DASHBOARD_SECURITY_HTML = (Path(__file__).parent / "static" / "dashboard_security.html").read_text(encoding="utf-8")
+_DASHBOARD_ANALYTICS_HTML = (Path(__file__).parent / "static" / "dashboard_analytics.html").read_text(encoding="utf-8")
 _DASHBOARD_TENANTS_HTML = (Path(__file__).parent / "static" / "dashboard_tenants.html").read_text(encoding="utf-8")
 _DASHBOARD_LAUNCH_HTML = (Path(__file__).parent / "static" / "dashboard_launch.html").read_text(encoding="utf-8")
 _DASHBOARD_ACCOUNT_HTML = (Path(__file__).parent / "static" / "dashboard_account.html").read_text(encoding="utf-8")
@@ -1901,6 +1938,12 @@ async def dashboard_scoring() -> HTMLResponse:
 async def dashboard_security() -> HTMLResponse:
     """Guard Activity (Phase 2/3 stat cards + tables) + Recent Errors."""
     return HTMLResponse(content=_DASHBOARD_SECURITY_HTML)
+
+@app.get("/dashboard/analytics", tags=["System"], response_class=HTMLResponse)
+async def dashboard_analytics() -> HTMLResponse:
+    """Real-time pageview analytics per site (controlmiles.com first, see
+    api/v1/endpoints/analytics.py)."""
+    return HTMLResponse(content=_DASHBOARD_ANALYTICS_HTML)
 
 @app.get("/dashboard/tenants", tags=["System"], response_class=HTMLResponse)
 async def dashboard_tenants() -> HTMLResponse:

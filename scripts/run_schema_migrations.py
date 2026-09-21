@@ -59,6 +59,8 @@ def main() -> None:
         ("_create_tenant_action_policies_schema", db._create_tenant_action_policies_schema),
         ("_create_agents_schema", db._create_agents_schema),
         ("_create_saml_connections_schema", db._create_saml_connections_schema),
+        ("_create_keys_schema", db._create_keys_schema),
+        ("_create_analytics_schema", db._create_analytics_schema),
         ("_lock_down_public_schema_grants", db._lock_down_public_schema_grants),
         ("_harden_legacy_pod_chain_functions", db._harden_legacy_pod_chain_functions),
     ]
